@@ -8,6 +8,7 @@ import subprocess
 from pathlib import Path
 
 from code_review_graph.extract import FileFacts, extractor_for
+from code_review_graph.extract.generic import UnsupportedLanguage
 from code_review_graph.graph import detect_clusters
 from code_review_graph.resolve import Resolver
 from code_review_graph.store import GraphStore
@@ -32,18 +33,41 @@ def list_files(repo: Path) -> list[str]:
         return sorted(found)
 
 
-def index_repo(repo: Path, store: GraphStore) -> dict[str, int]:
+def _go_module(repo: Path) -> str | None:
+    gomod = repo / "go.mod"
+    if gomod.is_file():
+        for line in gomod.read_text(errors="replace").splitlines():
+            if line.startswith("module "):
+                return line.split()[1].strip()
+    return None
+
+
+MAX_FILE_BYTES = 1_000_000   # generated bundles and vendored blobs aren't worth parsing
+
+
+def index_repo(repo: Path, store: GraphStore, warn=print) -> dict[str, int]:
     all_facts: list[FileFacts] = []
     hashes: dict[str, str] = {}
+    failed_langs: set[str] = set()
     for rel in list_files(repo):
         extract = extractor_for(rel)
         if extract is None:
             continue
         source = (repo / rel).read_bytes()
+        if len(source) > MAX_FILE_BYTES:
+            continue
+        try:
+            facts = extract(rel, source)
+        except UnsupportedLanguage as e:
+            lang = str(e).split(":", 1)[0]
+            if lang not in failed_langs:
+                failed_langs.add(lang)
+                warn(f"warning: no grammar for {e}; skipping those files")
+            continue
         hashes[rel] = hashlib.sha256(source).hexdigest()
-        all_facts.append(extract(rel, source))
+        all_facts.append(facts)
 
-    edges = Resolver(all_facts).edges()
+    edges = Resolver(all_facts, go_module=_go_module(repo)).edges()
     nodes = [n for f in all_facts for n in f.nodes]
     store.replace_graph(nodes, edges, hashes)
     store.replace_clusters(detect_clusters(store))

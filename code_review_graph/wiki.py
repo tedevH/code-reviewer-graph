@@ -57,8 +57,9 @@ and the cross-module invariants a reviewer should protect>"""
 
 
 def page_name(store: GraphStore, path: str) -> str:
+    """Python modules use their dotted name; other files their path, flattened."""
     node = store.node(path)
-    return node.name if node and node.name else path
+    return (node.name if node and node.name else path).replace("/", ".")
 
 
 def compile_wiki(
