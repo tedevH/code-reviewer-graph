@@ -78,7 +78,23 @@ Small local models are much better at one narrow question than at "review this",
 
 **Tested on a MacBook (M5, 24 GB), fully local.** The diff had two planted bugs: `parse_price` stopped stripping `$`, and a discount became `total * pct / 100`. With the default `qwen2.5-coder:7b`, the one-time model download took about 65 s, and a review (5 specialists plus the judge) takes about 80 s. The final review listed exactly the two bugs, with 5/5 and 4/5 agent agreement and a concrete failure for each ("total 100, pct 10 → 10.0 instead of 90.0"), and no noise.
 
-Each specialist analyses every changed line first (old behaviour, new behaviour, who relies on it) before it may report findings. Small models that skip this step tend to answer "no findings": the same 7B model found 0 of 2 bugs without it.
+**On a real repo:** [ky](https://github.com/sindresorhus/ky) (TypeScript), with a subtle planted bug: `mergeHeaders` stopped deleting headers set to `undefined`. The review took **43 s** and returned **one** finding, at the right line, with its blast radius from the graph:
+
+```
+### high: source/utils/merge.ts:78 MergeHeaders Does Not Remove Headers with Undefined Values
+Affects: `Ky.constructor` (source/core/Ky.ts:458), `Ky.create` (source/core/Ky.ts:349), `createRequest` (source/index.ts:17)
+```
+
+Before the fixes below, the same review took 6 min 16 s and returned 10 findings, only one of them real.
+
+What makes small local models usable here:
+
+- **Analysis before findings.** Each specialist traces every changed hunk (old behaviour, new behaviour, who relies on it) before it may report. Without this step `qwen2.5-coder:7b` found 0 of 2 planted bugs.
+- **Short, focused context.** Agents get the 8 most trustworthy callers per hop and 8 tests, not every test that reaches the change, and at most 1,000 output tokens each.
+- **Graph-checked output.** After the judge, crg cleans the review deterministically ([`consolidate.py`](code_review_graph/consolidate.py)):
+  - a finding restated at a caller is folded into its root cause as "Affects:", found by walking the impact graph back to the changed line;
+  - duplicates are merged;
+  - claims about tests outside the diff are dropped unless they quote code that really exists in that test.
 
 For the final verdict you can use a bigger judge than the specialists:
 

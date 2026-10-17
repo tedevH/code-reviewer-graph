@@ -9,6 +9,7 @@ from pathlib import Path
 
 from code_review_graph import context as ctx_mod
 from code_review_graph.agents import SPECIALISTS, multi_agent_review
+from code_review_graph.consolidate import consolidate
 from code_review_graph.diff import changed_nodes, git_diff
 from code_review_graph.events import EventBus, TerminalReporter
 from code_review_graph.indexer import index_repo
@@ -234,8 +235,11 @@ def cmd_review(args, repo: Path, store: GraphStore) -> int:
         run.finish()
         return 2
     try:
-        result = multi_agent_review(llm, run.bus, diff_text, ctx_mod.render_markdown(store, ctx),
+        result = multi_agent_review(llm, run.bus, diff_text, ctx_mod.render_markdown(store, ctx, max_items=8),
                                     workers=args.workers, only=only, judge_llm=judge_llm)
+        result, cleaned = consolidate(result, diff_text, ctx["hits"] + ctx["tests"], repo)
+        if any(cleaned.values()):
+            run.bus.log("Cleaned review: " + ", ".join(f"{v} {k.replace('_', ' ')}" for k, v in cleaned.items() if v))
         run.bus.emit("result", markdown=result)
         print(result, flush=True)
         if args.learn:

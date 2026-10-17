@@ -21,7 +21,21 @@ def build_context(store: GraphStore, seeds: list[str], max_depth: int = 3) -> di
     return {"seeds": seeds, "hits": hits, "tests": test_hits, "modules": near_modules}
 
 
-def render_markdown(store: GraphStore, ctx: dict) -> str:
+CONFIDENCE_ORDER = {"exact": 0, "name": 1, "ambiguous": 2}
+
+
+def _top(hits: list[Hit], limit: int | None) -> tuple[list[Hit], int]:
+    """Most trustworthy, nearest first; returns (kept, number left out)."""
+    if limit is None or len(hits) <= limit:
+        return hits, 0
+    ranked = sorted(hits, key=lambda h: (CONFIDENCE_ORDER[h.confidence], h.depth, h.node.id))
+    return ranked[:limit], len(hits) - limit
+
+
+def render_markdown(store: GraphStore, ctx: dict, max_items: int | None = None) -> str:
+    """Markdown context pack. `max_items` caps each caller hop and the test list:
+    agents need the closest, surest callers, not 40 tests that all reach the change
+    the same way (which also slows every agent down)."""
     hits: list[Hit] = ctx["hits"]
     out = ["# Review context", ""]
     if not hits:
@@ -37,12 +51,16 @@ def render_markdown(store: GraphStore, ctx: dict) -> str:
     if by_depth:
         out += ["## Callers (blast radius)", ""]
         for depth in sorted(by_depth):
+            kept, more = _top(by_depth[depth], max_items)
             out += [f"### {depth} hop{'s' if depth > 1 else ''}", ""]
-            out += [_line(h) for h in by_depth[depth]] + [""]
+            out += [_line(h) for h in kept]
+            out += [f"- … and {more} more"] if more else []
+            out.append("")
 
-    tests = ctx["tests"]
+    tests, more = _top(ctx["tests"], max_items)
     out += ["## Tests that reach the change", ""]
     out += [_line(h) for h in tests] if tests else ["- none found: this change may be untested"]
+    out += [f"- … and {more} more tests"] if more else []
     out.append("")
 
     out += ["## Wiki: affected modules", ""]

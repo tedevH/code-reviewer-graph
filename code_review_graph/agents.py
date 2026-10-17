@@ -37,6 +37,10 @@ class AgentSpec:
     focus: str = ""
 
 
+# Analysis + 3 findings fits comfortably; uncapped, 7B models wrote 2,400 tokens each
+# on a one-line ky change, which with 5 agents sharing one model took 5 minutes.
+SPECIALIST_MAX_TOKENS = 1000
+
 SPECIALIST_SYSTEM = """You are {name}, one member of a code review team. {focus}
 
 You will be given a pull request diff, the part of the code graph the change can \
@@ -52,9 +56,9 @@ SPECIALIST_TASK = """# Your task
 Review the diff above for problems in your area only. Work in two steps.
 
 ## Analysis
-For each changed line in the diff: what did the old code do, what does the new code do, \
+For each changed hunk in the diff: what did the old code do, what does the new code do, \
 and which callers or tests (see the context) rely on the old behaviour? Trace one concrete \
-input through old and new code.
+input through old and new code. Be brief: at most 120 words of analysis in total.
 
 ## Findings
 For each real problem the analysis revealed in your area:
@@ -63,8 +67,10 @@ For each real problem the analysis revealed in your area:
 Failure: <concrete input or state -> what goes wrong (exception, wrong value)>
 Evidence: <the code or caller that shows it>
 
-At most 5 findings. Write NO FINDINGS under this heading only if the analysis shows \
-nothing in your area is wrong."""
+At most 3 findings. Report each root cause once, at the changed line that causes it; \
+name affected callers in its Evidence instead of repeating the finding for each caller. \
+Write NO FINDINGS under this heading only if the analysis shows nothing in your area \
+is wrong."""
 
 SPECIALISTS = [
     AgentSpec("correctness", "Correctness", "Logic and edge cases", "#4f7cff",
@@ -179,7 +185,7 @@ def multi_agent_review(llm: LLM, bus: EventBus, diff_text: str, context_md: str,
     with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
         futures = {
             pool.submit(run_agent, llm, bus, s, SPECIALIST_SYSTEM.format(name=s.name, focus=s.focus),
-                        task_prompt): s
+                        task_prompt, max_tokens=SPECIALIST_MAX_TOKENS): s
             for s in specialists
         }
         for future, spec in futures.items():
