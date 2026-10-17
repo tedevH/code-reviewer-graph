@@ -1,6 +1,6 @@
 # code-reviewer-graph
 
-**Compile any codebase into a self-updating knowledge graph, then review pull requests with a team of local AI agents that can see the blast radius. Free, private, and live on screen.**
+**Compile any codebase into a self-updating knowledge graph, then review pull requests with a team of local AI agents that can see the blast radius. 100% local open models: free, private, and live on screen.**
 
 ![Five local agents reviewing a diff in parallel](docs/dashboard.jpg)
 
@@ -8,7 +8,7 @@ Most AI code review tools paste a diff into a model and hope. The model never se
 
 `code-reviewer-graph` (`crg`) follows Andrej Karpathy's *LLM wiki* idea: **compile knowledge once, keep it current, and query it.** It builds a persistent graph of your code in any language. Agents write an interlinked wiki on top of it, and each review gets only the subgraph a change actually touches. Reviews write back what they learn, so review #500 knows things review #1 didn't.
 
-By default every agent runs **locally through Ollama**: no API key, no cost, and no code leaves your machine.
+Every agent runs on **open models on your own machine**: no API keys, no cloud, no cost, and no code leaves your computer. If you don't have a model yet, crg downloads one sized to your RAM.
 
 ```
              ┌──────────────── exact layer (tree-sitter, no LLM) ────────────────┐
@@ -31,22 +31,34 @@ By default every agent runs **locally through Ollama**: no API key, no cost, and
                              Judge ──▶ final review ──▶ learnings written back to the graph
 ```
 
-## Quickstart (free, local)
+## Quickstart
 
 ```bash
-# 1. a local model runtime
-brew install ollama            # or see ollama.com for Linux/Windows
-OLLAMA_NUM_PARALLEL=4 ollama serve
-ollama pull qwen2.5-coder:7b   # any chat model works; bigger = better reviews
-
-# 2. crg
+brew install ollama        # Linux: curl -fsSL https://ollama.com/install.sh | sh
 pip install git+https://github.com/tedevH/code-reviewer-graph
 
-# 3. in your repo
-crg index                          # parse into the graph: seconds, no LLM
-crg compile --ui                   # librarian agents write the wiki, live on screen
+cd your-repo
+crg index                            # parse into the graph: seconds, no model needed
+crg compile --ui                     # librarian agents write the wiki, live on screen
 crg review --diff main --ui --learn  # 5 specialists + judge review your branch
 ```
+
+That's all. On the first `compile` or `review`, crg:
+
+1. **starts Ollama** if it isn't running, with `OLLAMA_NUM_PARALLEL` set so agents really run at once (and stops it again when crg exits), and
+2. **downloads the model** if you don't have it, with progress in the terminal and the dashboard. This happens once.
+
+The default model depends on your RAM:
+
+| RAM | Model | Download |
+|---|---|---|
+| < 8 GB | `qwen2.5-coder:1.5b` | 1 GB |
+| 8–16 GB | `qwen2.5-coder:3b` | 1.9 GB |
+| 16–32 GB | `qwen2.5-coder:7b` | 4.7 GB |
+| 32–64 GB | `qwen2.5-coder:14b` | 9 GB |
+| 64 GB+ | `qwen2.5-coder:32b` | 20 GB |
+
+Any model in the [Ollama library](https://ollama.com/library) works too: `--model llama3.1:8b`, `--model deepseek-coder-v2:16b`, … It is downloaded automatically if missing. `--no-pull` turns auto-download off.
 
 `--ui` opens the dashboard at `http://127.0.0.1:8765`. Every agent gets a card showing its status (queued, waiting for model, thinking, writing, done), its live token stream, tokens/sec and elapsed time. A run panel and an activity log sit beside the cards, and the final review appears when the judge finishes. The server binds to localhost only.
 
@@ -64,19 +76,24 @@ crg review --diff main --ui --learn  # 5 specialists + judge review your branch
 
 Small local models are much better at one narrow question than at "review this", so each specialist gets one job. Before the judge runs, crg groups the specialists' findings by file and line and tells the judge how many agents flagged each spot independently. That is a deterministic consensus signal that helps a small judge separate real bugs from noise.
 
-**Tested on a MacBook (M5, 24 GB) with `gemma3:4b`:** on a diff with two planted bugs, all five specialists flagged the broken `parse_price` (5/5 consensus) and three flagged the broken discount math. The full review took about 45 seconds and cost nothing. A 4B judge still lets some duplicates through. Use a 7–14B coder model, or give the judge a bigger one:
+**Tested on a MacBook (M5, 24 GB), fully local.** The diff had two planted bugs: `parse_price` stopped stripping `$`, and a discount became `total * pct / 100`. With the default `qwen2.5-coder:7b`, the one-time model download took about 65 s, and a review (5 specialists plus the judge) takes about 80 s. The final review listed exactly the two bugs, with 5/5 and 4/5 agent agreement and a concrete failure for each ("total 100, pct 10 → 10.0 instead of 90.0"), and no noise.
+
+Each specialist analyses every changed line first (old behaviour, new behaviour, who relies on it) before it may report findings. Small models that skip this step tend to answer "no findings": the same 7B model found 0 of 2 bugs without it.
+
+For the final verdict you can use a bigger judge than the specialists:
 
 ```bash
-crg review --diff main --model qwen2.5-coder:7b --judge-model qwen2.5-coder:14b --ui
+crg review --diff main --judge-model qwen2.5-coder:14b --ui   # downloaded automatically if missing
 ```
 
-### Model providers
+### Local runtimes
 
-| `--provider` | What | Notes |
+crg only runs open models locally. There are no cloud providers.
+
+| `--provider` | Runtime | Notes |
 |---|---|---|
-| `ollama` (default) | local models via [Ollama](https://ollama.com) | Picks your first installed model if `--model` isn't given. Set `OLLAMA_NUM_PARALLEL` so agents truly run at once. |
-| `openai` | any OpenAI-compatible local server: LM Studio, llama.cpp `llama-server`, vLLM, LocalAI | `--base-url http://localhost:1234/v1` |
-| `anthropic` | Claude via the Anthropic API | Paid; `crg compile` asks before spending. Needs `ANTHROPIC_API_KEY` or `ant auth login`. |
+| `ollama` (default) | [Ollama](https://ollama.com) | Auto-starts the server and auto-downloads models. |
+| `openai` | any local server with an OpenAI-style API: [LM Studio](https://lmstudio.ai), llama.cpp `llama-server`, [MLX](https://github.com/ml-explore/mlx-lm) `mlx_lm.server`, vLLM, LocalAI | Download and load the model in that app, then `--base-url http://localhost:1234/v1`. |
 
 Environment overrides: `CRG_PROVIDER`, `CRG_MODEL`, `CRG_BASE_URL`, `CRG_NUM_CTX` (Ollama context window, default 16384; Ollama silently truncates prompts beyond it), `OLLAMA_HOST`.
 
@@ -154,22 +171,22 @@ jobs:
         with: { fetch-depth: 0 }
       - uses: actions/setup-python@v5
         with: { python-version: "3.12" }
+      - run: curl -fsSL https://ollama.com/install.sh | sh
       - run: pip install git+https://github.com/tedevH/code-reviewer-graph
       - run: crg index
-      # Local models need a GPU runner; on hosted runners use the Claude provider.
-      - run: crg review --provider anthropic --diff origin/${{ github.base_ref }} > review.md
-        env: { ANTHROPIC_API_KEY: "${{ secrets.ANTHROPIC_API_KEY }}" }
+      # Hosted runners are CPU-only: use a small model, or a self-hosted runner with a GPU.
+      - run: crg review --model qwen2.5-coder:1.5b --diff origin/${{ github.base_ref }} > review.md
       - run: gh pr comment ${{ github.event.number }} --body-file review.md
         env: { GH_TOKEN: "${{ github.token }}" }
 ```
 
-Cache `.crg/` between runs (`actions/cache`) so `compile` only re-summarizes changed modules.
+Cache `.crg/` and `~/.ollama/models` between runs (`actions/cache`), so `compile` only re-summarizes changed modules and the model downloads once.
 
 ## Limitations
 
 - Static resolution can't see dynamic dispatch, monkey-patching or callbacks passed as values. Those show up as missing or `ambiguous` edges, never as false `exact` ones.
 - Outside the tested languages, import resolution is best-effort, so expect more `name`/`ambiguous` edges.
-- Review quality tracks model size. A 4B model finds real bugs but writes a noisier final review than a 14B model or Claude.
+- Review quality tracks model size. A 4B model finds real bugs but writes a noisier final review than a 14B+ model.
 - Files over 1 MB are skipped by `index`, and over 200 KB by `compile`, rather than silently truncated.
 
 ## Roadmap

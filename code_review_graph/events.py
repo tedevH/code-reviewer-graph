@@ -7,6 +7,7 @@ that reconnects (or opens late) replays everything it missed.
   agent       {id, name, role, color, status, task?}   registration and status changes
   delta       {id, kind: "text" | "thinking", text}    streamed tokens (coalesced)
   agent_done  {id, status: "done" | "error", tokens, seconds, task?, error?}
+  download    {stage: "server" | "download" | "done", model, message, completed?, total?}
   log         {message, level}
   result      {markdown}
   run_done    {seconds}
@@ -47,6 +48,7 @@ class TerminalReporter:
     def __init__(self, bus: EventBus, stream=sys.stderr):
         self.bus, self.stream = bus, stream
         self.names: dict[str, str] = {}
+        self._dl_step: dict[str, int] = {}
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._run, daemon=True)
 
@@ -83,6 +85,23 @@ class TerminalReporter:
                 self._line(f"{name:<14} ✓{what} ({e['tokens']} tok, {e['seconds']:.1f}s)")
         elif t == "log":
             self._line(e["message"])
+        elif t == "download":
+            self._download(e)
+
+    def _download(self, e: dict) -> None:
+        if e["stage"] == "server":
+            self._line(e["message"])
+        elif e["stage"] == "done":
+            self._line(f"Downloaded {e['model']}")
+        elif e.get("total", 0) > 50_000_000:   # the weights; skip tiny config layers
+            pct = int(100 * e["completed"] / e["total"])
+            step = pct // 10
+            if step != self._dl_step.get(e["model"]):
+                self._dl_step[e["model"]] = step
+                gb = lambda b: f"{b / 1e9:.1f}"  # noqa: E731
+                self._line(f"Downloading {e['model']}: {pct}% ({gb(e['completed'])}/{gb(e['total'])} GB)")
+        elif e["message"] == "starting download":
+            self._line(f"{e['model']} isn't on this machine yet; downloading it now")
 
     def _line(self, text: str) -> None:
         print(f"[{time.time() - self.bus.started:6.1f}s] {text}", file=self.stream, flush=True)

@@ -37,20 +37,34 @@ class AgentSpec:
     focus: str = ""
 
 
-REVIEW_BASE = """You are one member of a code review team. You are given a pull request \
-diff, the part of the code graph the change can affect (callers by hop, tests that \
-reach it), and wiki pages compiled about the affected modules, including notes from \
-earlier reviews.
+SPECIALIST_SYSTEM = """You are {name}, one member of a code review team. {focus}
 
-{focus}
+You will be given a pull request diff, the part of the code graph the change can \
+affect (callers by hop, tests that reach it), and wiki pages compiled about the \
+affected modules, including notes from earlier reviews."""
 
-Report only problems you can tie to specific lines of the diff. For each one:
+# Instructions go after the code: small local models follow the end of the prompt
+# best, and making them analyse each change before deciding stops them from
+# reaching for "no findings" (measured: qwen2.5-coder:7b found 0 of 2 planted bugs
+# with findings-only instructions, 2 of 2 with this).
+SPECIALIST_TASK = """# Your task
+
+Review the diff above for problems in your area only. Work in two steps.
+
+## Analysis
+For each changed line in the diff: what did the old code do, what does the new code do, \
+and which callers or tests (see the context) rely on the old behaviour? Trace one concrete \
+input through old and new code.
+
+## Findings
+For each real problem the analysis revealed in your area:
 
 ### <high|medium|low>: <file>:<line> <one-line title>
-Failure: <concrete inputs or state -> what goes wrong>
+Failure: <concrete input or state -> what goes wrong (exception, wrong value)>
 Evidence: <the code or caller that shows it>
 
-Report at most 5. If you find nothing in your area, reply exactly: NO FINDINGS"""
+At most 5 findings. Write NO FINDINGS under this heading only if the analysis shows \
+nothing in your area is wrong."""
 
 SPECIALISTS = [
     AgentSpec("correctness", "Correctness", "Logic and edge cases", "#4f7cff",
@@ -159,16 +173,18 @@ def multi_agent_review(llm: LLM, bus: EventBus, diff_text: str, context_md: str,
     for s in [*specialists, JUDGE]:
         bus.emit("agent", id=s.id, name=s.name, role=s.role, color=s.color, status="queued")
     prompt = f"{context_md}\n\n# Diff\n\n```diff\n{diff_text}\n```"
+    task_prompt = f"{prompt}\n\n{SPECIALIST_TASK}"
 
     findings: dict[str, str] = {}
     with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
         futures = {
-            pool.submit(run_agent, llm, bus, s, REVIEW_BASE.format(focus=s.focus), prompt): s
+            pool.submit(run_agent, llm, bus, s, SPECIALIST_SYSTEM.format(name=s.name, focus=s.focus),
+                        task_prompt): s
             for s in specialists
         }
         for future, spec in futures.items():
             try:
-                findings[spec.name] = future.result().strip()
+                findings[spec.name] = findings_section(future.result())
             except Exception as e:
                 findings[spec.name] = f"(agent failed: {e})"
 
@@ -182,14 +198,32 @@ def multi_agent_review(llm: LLM, bus: EventBus, diff_text: str, context_md: str,
         f"({', '.join(s['agents'])}); severities: {', '.join(s['severities'])}"
         for s in agreed
     ) or "- no findings reported"
-    judge_prompt = f"{prompt}\n\n{reports}\n\n# Agreement between specialists\n\n{table}"
+    judge_prompt = (f"{prompt}\n\n{reports}\n\n# Agreement between specialists\n\n{table}\n\n"
+                    "# Your task\n\nWrite the final review now, in exactly the format from your instructions.")
     return run_agent(judge_llm or llm, bus, JUDGE, JUDGE_SYSTEM, judge_prompt, max_tokens=6000)
 
 
-FINDING = re.compile(
-    r"^#{2,4}\s*\[?(?P<sev>high|medium|low)\]?\b[^:\n]*:\s*`?(?P<file>[\w./-]+\.\w+)`?:(?P<line>\d+)",
-    re.IGNORECASE | re.MULTILINE,
-)
+_SEVERITY = re.compile(r"\b(high|medium|low)\b", re.IGNORECASE)
+_LOCATION = re.compile(r"`?(?P<file>[\w./-]+\.\w+)`?:(?P<line>\d+)")
+
+
+def findings_section(text: str) -> str:
+    """The specialist's Findings section (the judge doesn't need its analysis)."""
+    _, found, tail = text.partition("## Findings")
+    return (tail if found else text).strip()
+
+
+def _findings(text: str) -> list[tuple[str, int, str]]:
+    """(file, line, severity) per `###` finding header. Models format these loosely:
+    `### high: a.py:3 x`, `### <high>: a.py:3`, `### : a.py:3 **High**: x`."""
+    out = []
+    for line in text.splitlines():
+        if not line.lstrip().startswith("###"):
+            continue
+        loc, sev = _LOCATION.search(line), _SEVERITY.search(line)
+        if loc:
+            out.append((loc.group("file"), int(loc.group("line")), sev.group(1).lower() if sev else "medium"))
+    return out
 
 
 def consensus(findings: dict[str, str], window: int = 2) -> list[dict]:
@@ -199,8 +233,7 @@ def consensus(findings: dict[str, str], window: int = 2) -> list[dict]:
     of which problems several agents found independently. Most-agreed first."""
     spots: list[dict] = []
     for agent, text in findings.items():
-        for m in FINDING.finditer(text):
-            file, line, sev = m.group("file"), int(m.group("line")), m.group("sev").lower()
+        for file, line, sev in _findings(text):
             spot = next((s for s in spots if s["file"] == file and abs(s["line"] - line) <= window), None)
             if spot is None:
                 spot = {"file": file, "line": line, "agents": [], "severities": []}

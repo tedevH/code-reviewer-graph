@@ -103,6 +103,16 @@ aside { display: flex; flex-direction: column; gap: 14px; min-width: 0; }
 .log .t { color: var(--faint); font-variant-numeric: tabular-nums; }
 .log .warn { color: var(--warn); } .log .err { color: var(--err); } .log .ok { color: var(--ok); }
 
+.dl { display: none; margin-bottom: 18px; }
+.dl.show { display: block; }
+.dl .row { display: flex; justify-content: space-between; gap: 12px; align-items: baseline; flex-wrap: wrap; }
+.dl .name { font-weight: 620; }
+.dl .name code { font: 13px var(--mono); }
+.dl .num { color: var(--muted); font-size: 12.5px; font-variant-numeric: tabular-nums; }
+.dl .track { height: 8px; border-radius: 999px; background: var(--line); margin-top: 10px; overflow: hidden; }
+.dl .fill { height: 100%; width: 0; background: var(--write); border-radius: 999px; transition: width .3s ease; }
+.dl.done .fill { background: var(--ok); }
+.dl .sub { color: var(--muted); font-size: 12.5px; margin-top: 6px; }
 .result { margin-top: 18px; display: none; }
 .result.show { display: block; }
 .md { font-size: 14.5px; line-height: 1.6; }
@@ -123,7 +133,7 @@ aside { display: flex; flex-direction: column; gap: 14px; min-width: 0; }
         <circle cx="5" cy="6" r="2.2"/><circle cx="19" cy="6" r="2.2"/><circle cx="12" cy="18" r="2.2"/>
         <path d="M7 7l3.6 9M17 7l-3.6 9M7.2 6h9.6"/>
       </svg>
-      code-review-graph
+      code-reviewer-graph
     </div>
     <span class="title" id="title">Waiting for a run…</span>
     <span class="spacer"></span>
@@ -136,6 +146,11 @@ aside { display: flex; flex-direction: column; gap: 14px; min-width: 0; }
 
 <main>
   <section>
+    <div class="panel dl" id="dl">
+      <div class="row"><span class="name">Downloading <code id="dlModel"></code></span><span class="num" id="dlNum"></span></div>
+      <div class="track"><div class="fill" id="dlFill"></div></div>
+      <div class="sub" id="dlSub">Your agents start as soon as the model is on this machine. This only happens once.</div>
+    </div>
     <div class="stats">
       <div class="stat"><div class="k">Agents working</div><div class="v" id="sActive">0</div></div>
       <div class="stat"><div class="k" id="sDoneLabel">Tasks done</div><div class="v" id="sDone">0</div></div>
@@ -293,6 +308,25 @@ function handle(e) {
       a.el.querySelector(".ct").textContent = a.tasks > 1 || e.task ? `${a.tasks} done` : "";
       if (e.status === "error") { append(a, "text", `\n\n⚠ ${e.error}`); log(e.t, `${a.el.querySelector(".n").textContent} failed: ${e.error}`, "err"); }
       else log(e.t, `${a.el.querySelector(".n").textContent} finished${e.task ? " " + e.task : ""} (${e.tokens} tok, ${e.seconds.toFixed(1)}s)`, "ok");
+      break;
+    }
+    case "download": {
+      if (e.stage === "server") { log(e.t, e.message); break; }
+      const dl = $("dl"); dl.classList.add("show");
+      $("dlModel").textContent = e.model;
+      if (e.stage === "done") {
+        dl.classList.add("done"); $("dlFill").style.width = "100%";
+        $("dlNum").textContent = "ready"; $("dlSub").textContent = "Model downloaded. Starting agents…";
+        log(e.t, `Downloaded ${e.model}`, "ok");
+        setTimeout(() => dl.classList.remove("show"), 4000);
+      } else if (e.total) {
+        const pct = (100 * e.completed / e.total);
+        $("dlFill").style.width = pct.toFixed(1) + "%";
+        $("dlNum").textContent = `${(e.completed / 1e9).toFixed(2)} / ${(e.total / 1e9).toFixed(2)} GB · ${pct.toFixed(0)}%`;
+      } else {
+        $("dlNum").textContent = e.message || "";
+        if (e.message === "starting download") log(e.t, `${e.model} isn't on this machine yet, downloading`);
+      }
       break;
     }
     case "log": log(e.t, e.message, e.level === "warn" ? "warn" : e.level === "error" ? "err" : ""); break;

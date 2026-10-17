@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import signal
 import sys
 from pathlib import Path
 
@@ -11,7 +12,7 @@ from code_review_graph.agents import SPECIALISTS, multi_agent_review
 from code_review_graph.diff import changed_nodes, git_diff
 from code_review_graph.events import EventBus, TerminalReporter
 from code_review_graph.indexer import index_repo
-from code_review_graph.llm import DEFAULT_PROVIDER, LLMError, make_llm
+from code_review_graph.llm import DEFAULT_PROVIDER, LLMError, make_llm, recommended_model
 from code_review_graph.store import GraphStore
 from code_review_graph.wiki import compile_wiki, render_wiki
 
@@ -26,8 +27,7 @@ def main(argv: list[str] | None = None) -> int:
 
     p = sub.add_parser("compile", help="have agents write wiki pages for stale modules and clusters")
     p.add_argument("--limit", type=int, help="compile at most N modules this run")
-    _add_model_args(p, effort="low", workers=3)
-    p.add_argument("-y", "--yes", action="store_true", help="don't ask before calling a paid API")
+    _add_model_args(p, workers=3)
 
     sub.add_parser("wiki", help="re-render wiki pages from the graph (no LLM)")
 
@@ -37,7 +37,7 @@ def main(argv: list[str] | None = None) -> int:
 
     p = sub.add_parser("review", help="multi-agent review of a diff with graph + wiki context")
     _add_target_args(p, symbols=False)
-    _add_model_args(p, effort="high", workers=len(SPECIALISTS))
+    _add_model_args(p, workers=len(SPECIALISTS))
     p.add_argument("--agents", help="comma-separated specialists to run (default: all): "
                    + ",".join(s.id for s in SPECIALISTS))
     p.add_argument("--judge-model", help="a different (usually larger) model for the judge, same provider")
@@ -50,6 +50,8 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("stats", help="graph size")
 
     args = parser.parse_args(argv)
+    # Exit cleanly on `kill` too, so a model server crg started gets stopped (atexit).
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(143))
     repo = args.repo.resolve()
     store = GraphStore.for_repo(repo)
     try:
@@ -66,13 +68,14 @@ def _add_target_args(p: argparse.ArgumentParser, symbols: bool = True) -> None:
     p.add_argument("--depth", type=int, default=3, help="caller hops to follow (default: 3)")
 
 
-def _add_model_args(p: argparse.ArgumentParser, effort: str, workers: int) -> None:
-    p.add_argument("--provider", default=DEFAULT_PROVIDER, choices=["ollama", "openai", "anthropic"],
-                   help="ollama (local, default), openai (any OpenAI-compatible local server), anthropic")
-    p.add_argument("--model", help="model name (default: first installed local model, or Claude Opus)")
-    p.add_argument("--base-url", help="server URL for ollama/openai providers")
-    p.add_argument("--effort", default=effort, choices=["low", "medium", "high", "xhigh", "max"],
-                   help="Claude only")
+def _add_model_args(p: argparse.ArgumentParser, workers: int) -> None:
+    rec, size = recommended_model()
+    p.add_argument("--provider", default=DEFAULT_PROVIDER, choices=["ollama", "openai"],
+                   help="ollama (default) or openai (LM Studio, llama.cpp, vLLM, MLX server)")
+    p.add_argument("--model", help=f"local model (default for this machine: {rec}, {size}; "
+                   "downloaded automatically if missing)")
+    p.add_argument("--base-url", help="server URL (default: Ollama on localhost:11434)")
+    p.add_argument("--no-pull", action="store_true", help="fail instead of downloading a missing model")
     p.add_argument("--workers", type=int, default=workers, help=f"agents running in parallel (default: {workers})")
     p.add_argument("--ui", action="store_true", help="open the live agent dashboard")
     p.add_argument("--port", type=int, default=8765, help="dashboard port (default: 8765)")
@@ -94,6 +97,19 @@ class _Run:
         self.bus.emit("run", title=title, kind=kind, provider=llm.provider, model=llm.model,
                       repo=repo.name, meta=meta)
 
+    def prepare(self, *llms) -> bool:
+        """Start the local server and download missing models, showing progress."""
+        for llm in llms:
+            if llm is None:
+                continue
+            try:
+                llm.prepare(lambda info: self.bus.emit("download", **info))
+            except LLMError as e:
+                self.bus.log(str(e), "error")
+                print(f"error: {e}", file=sys.stderr)
+                return False
+        return True
+
     def finish(self) -> None:
         import time
 
@@ -104,9 +120,10 @@ class _Run:
             self.dashboard.hold()
 
 
-def _llm(args):
+def _llm(args, model: str | None = None):
     try:
-        return make_llm(args.provider, args.model, args.effort, args.base_url)
+        return make_llm(args.provider, model or args.model, args.base_url,
+                        parallel=args.workers, auto_pull=not args.no_pull)
     except LLMError as e:
         print(f"error: {e}", file=sys.stderr)
         return None
@@ -135,12 +152,11 @@ def cmd_compile(args, repo: Path, store: GraphStore) -> int:
     llm = _llm(args)
     if llm is None:
         return 2
-    if todo and llm.provider == "anthropic" and not args.yes:
-        answer = input(f"Compile {len(todo)} module(s) with {llm.model}? This calls the paid Claude API. [y/N] ")
-        if answer.strip().lower() not in ("y", "yes"):
-            return 1
     run = _Run(args, "compile", f"Compiling wiki for {repo.name}", llm, repo,
                {"modules to write": len(todo), "agents": args.workers, "tasks": len(todo)})
+    if not run.prepare(llm):
+        run.finish()
+        return 2
     try:
         result = compile_wiki(repo, store, llm, limit=args.limit, bus=run.bus, workers=args.workers,
                               progress=run.bus.log)
@@ -204,13 +220,9 @@ def cmd_review(args, repo: Path, store: GraphStore) -> int:
     llm = _llm(args)
     if llm is None:
         return 2
-    judge_llm = None
-    if args.judge_model:
-        try:
-            judge_llm = make_llm(args.provider, args.judge_model, args.effort, args.base_url)
-        except LLMError as e:
-            print(f"error: {e}", file=sys.stderr)
-            return 2
+    judge_llm = _llm(args, args.judge_model) if args.judge_model else None
+    if args.judge_model and judge_llm is None:
+        return 2
     ctx = ctx_mod.build_context(store, seeds, max_depth=args.depth)
     callers = sum(1 for h in ctx["hits"] if h.depth > 0)
     title = f"Reviewing {f'diff vs {args.diff}' if args.diff else 'diff'} in {repo.name}"
@@ -218,6 +230,9 @@ def cmd_review(args, repo: Path, store: GraphStore) -> int:
         "changed symbols": len(seeds), "callers in reach": callers, "tests in reach": len(ctx["tests"]),
         "diff lines": diff_text.count("\n"), "tasks": len(only or SPECIALISTS) + 1,
     })
+    if not run.prepare(llm, judge_llm):
+        run.finish()
+        return 2
     try:
         result = multi_agent_review(llm, run.bus, diff_text, ctx_mod.render_markdown(store, ctx),
                                     workers=args.workers, only=only, judge_llm=judge_llm)

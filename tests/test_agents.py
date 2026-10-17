@@ -70,9 +70,18 @@ def test_consensus_groups_nearby_findings():
 
     spots = consensus({
         "Correctness": "### high: shop/models.py:2 bad parse\nFailure: x",
-        "Security": "### HIGH: `shop/models.py`:3 unvalidated\n### low: shop/api.py:9 meh",
+        "Security": "### <HIGH>: `shop/models.py`:3 unvalidated\n### low: shop/api.py:9 meh",
+        "Impact": "### : `shop/models.py:1` **High**: Order.total breaks",
         "Tests": "NO FINDINGS",
     })
     assert spots[0]["file"] == "shop/models.py"
-    assert spots[0]["agents"] == ["Correctness", "Security"]
+    assert spots[0]["agents"] == ["Correctness", "Security", "Impact"]
+    assert spots[0]["severities"] == ["high", "high", "high"]
     assert spots[1]["agents"] == ["Security"]
+
+
+def test_judge_sees_findings_not_analysis():
+    from code_review_graph.agents import findings_section
+
+    text = "## Analysis\nlong reasoning\n\n## Findings\n### high: a.py:1 x"
+    assert findings_section(text) == "### high: a.py:1 x"
