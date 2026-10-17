@@ -78,5 +78,10 @@ def test_clusters_group_coupled_modules(store):
 
 
 def test_parse_learnings():
-    md = "Looks fine.\n\n## Learnings\n- shop/models.py::parse_price: prices are strings with a $ prefix\n- junk\n"
-    assert parse_learnings(md) == [("shop/models.py::parse_price", "prices are strings with a $ prefix")]
+    md = ("Looks fine.\n\n## Learnings\n- shop/models.py::parse_price: prices are strings with a $ prefix\n"
+          "- `shop/pricing.py:apply_discount`: pct is a percentage off\n- shop/api.py: thin wrapper\n- junk\n")
+    assert parse_learnings(md) == [
+        ("shop/models.py::parse_price", "prices are strings with a $ prefix"),
+        ("shop/pricing.py::apply_discount", "pct is a percentage off"),
+        ("shop/api.py", "thin wrapper"),
+    ]

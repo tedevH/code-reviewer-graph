@@ -2,12 +2,12 @@ from code_review_graph.wiki import compile_wiki, render_wiki
 
 
 class FakeLLM:
-    model = "fake"
+    provider, model, context_tokens = "fake", "fake", None
 
     def __init__(self):
         self.calls = 0
 
-    def complete(self, system, prompt, max_tokens=16000):
+    def complete(self, system, prompt, max_tokens=16000, on_token=None):
         self.calls += 1
         if prompt.startswith("These modules"):
             return "TITLE: Order pipeline\nOrders are priced then saved."

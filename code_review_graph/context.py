@@ -3,25 +3,12 @@
 from __future__ import annotations
 
 import json
+import re
 from collections import defaultdict
 
 from code_review_graph.graph import Hit, impact, is_test
-from code_review_graph.llm import LLM
 from code_review_graph.store import GraphStore
 from code_review_graph.wiki import page_name
-
-REVIEW_SYSTEM = """You are a senior engineer reviewing a pull request. You are given the \
-diff, the part of the code graph the change can affect, and wiki pages the team's tooling \
-compiled about the affected modules (including notes from past reviews).
-
-Report only real defects: bugs, broken callers, violated invariants, security problems, \
-missing handling that will fail in practice. For each, give file:line, a one-sentence \
-statement, and a concrete failure scenario (inputs or state -> wrong result). Use the \
-impact graph to check callers the diff didn't touch. Skip style and taste. If nothing \
-survives scrutiny, say so in one line. End with a section `## Learnings` holding 0-3 \
-durable facts about this codebase worth remembering for future reviews, each as \
-`- <file path or path::qualname>: <fact>`."""
-
 
 def build_context(store: GraphStore, seeds: list[str], max_depth: int = 3) -> dict:
     hits = impact(store, seeds, max_depth=max_depth)
@@ -90,13 +77,16 @@ def render_json(ctx: dict) -> str:
     )
 
 
-def review(llm: LLM, diff_text: str, context_md: str) -> str:
-    prompt = f"{context_md}\n\n# Diff\n\n```diff\n{diff_text}\n```"
-    return llm.complete(REVIEW_SYSTEM, prompt, max_tokens=64000)
+LEARNING = re.compile(
+    r"^-\s+`?(?P<path>[\w./-]+\.\w+)(?:(?:::|:|#)(?P<qual>[\w.]+))?`?\s*:\s*(?P<fact>.+)$"
+)
 
 
 def parse_learnings(review_md: str) -> list[tuple[str, str]]:
-    """Pull `- target: fact` lines out of the review's Learnings section."""
+    """Pull `- target: fact` lines out of the review's Learnings section.
+
+    Targets may be `path`, `path::Qual.name`, or the `path:name` form small models
+    tend to write; all are normalized to graph ids."""
     _, found, tail = review_md.partition("## Learnings")
     if not found:
         return []
@@ -105,15 +95,10 @@ def parse_learnings(review_md: str) -> list[tuple[str, str]]:
         line = line.strip()
         if line.startswith("## "):
             break
-        if line.startswith("- ") and ":" in line:
-            target, _, fact = line[2:].partition(":")
-            # path::qualname contains "::"; re-split if we cut inside it
-            if fact.startswith(":"):
-                rest_target, _, fact = fact[1:].partition(":")
-                target = f"{target}::{rest_target}"
-            target, fact = target.strip().strip("`"), fact.strip()
-            if target and fact:
-                out.append((target, fact))
+        m = LEARNING.match(line)
+        if m:
+            target = f"{m.group('path')}::{m.group('qual')}" if m.group("qual") else m.group("path")
+            out.append((target, m.group("fact").strip().strip("`").strip()))
     return out
 
 

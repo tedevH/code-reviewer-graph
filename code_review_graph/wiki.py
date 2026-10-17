@@ -19,7 +19,9 @@ from pathlib import Path
 from typing import Callable
 
 from code_review_graph.graph import TESTS_CLUSTER
-from code_review_graph.llm import LLM, LLMRefusal
+from code_review_graph.agents import Job, run_pool
+from code_review_graph.events import EventBus
+from code_review_graph.llm import LLM
 from code_review_graph.store import GraphStore
 
 MAX_SOURCE_BYTES = 200_000
@@ -68,10 +70,14 @@ def compile_wiki(
     llm: LLM,
     limit: int | None = None,
     progress: Callable[[str], None] = print,
+    bus: EventBus | None = None,
+    workers: int = 1,
 ) -> dict[str, int]:
-    """Summarize stale modules, then stale clusters. Returns counts."""
+    """Summarize stale modules, then stale clusters, with `workers` agents in parallel."""
+    bus = bus or EventBus()
     hashes = store.file_hashes()
     done = skipped = failed = 0
+    jobs: list[Job] = []
     for path in store.stale_summaries()[: limit if limit else None]:
         source = (repo / path).read_bytes()
         if not source.strip():
@@ -81,41 +87,43 @@ def compile_wiki(
             progress(f"  skip {path}: {len(source):,} bytes is over the {MAX_SOURCE_BYTES:,} limit")
             skipped += 1
             continue
-        progress(f"  module  {path}")
         prompt = MODULE_PROMPT.format(
             path=path,
             deps=", ".join(store.imports_of(path)) or "none",
             users=", ".join(store.imported_by(path)) or "none",
             source=source.decode("utf-8", errors="replace"),
         )
-        try:
-            summary = llm.complete(MODULE_SYSTEM, prompt)
-        except LLMRefusal as e:
-            progress(f"  fail {path}: {e}")
+        jobs.append(Job(path, path, MODULE_SYSTEM, prompt))
+
+    for job, result in run_pool(llm, bus, jobs, workers, name="Librarian", role="Writes module pages"):
+        if isinstance(result, Exception) or not result.strip():
+            progress(f"  fail {job.key}: {result or 'empty response'}")
             failed += 1
             continue
-        store.put_summary(path, hashes[path], summary, llm.model)
+        store.put_summary(job.key, hashes[job.key], result.strip(), llm.model)
         done += 1
 
     clusters = store.clusters()
-    cluster_done = 0
+    cluster_jobs: list[Job] = []
     for cluster in store.stale_clusters():
         members = clusters[cluster]
         summaries = [(p, store.summary(p)) for p in members]
         if cluster == TESTS_CLUSTER or len(members) < 2 or any(s is None for _, s in summaries):
             continue  # singletons need no cluster page; wait until all members are compiled
-        progress(f"  cluster {cluster}")
         listing = "\n\n".join(f"## {p}\n{s}" for p, s in summaries)
-        try:
-            reply = llm.complete(MODULE_SYSTEM, CLUSTER_PROMPT.format(members=listing))
-        except LLMRefusal as e:
-            progress(f"  fail cluster {cluster}: {e}")
+        cluster_jobs.append(Job(cluster, f"cluster {cluster}", MODULE_SYSTEM,
+                                CLUSTER_PROMPT.format(members=listing), max_tokens=1024))
+
+    cluster_done = 0
+    for job, result in run_pool(llm, bus, cluster_jobs, workers, name="Cartographer",
+                                role="Writes cluster pages"):
+        if isinstance(result, Exception) or not result.strip():
+            progress(f"  fail cluster {job.key}: {result or 'empty response'}")
             failed += 1
             continue
-        title, _, body = reply.partition("\n")
-        store.put_cluster_summary(
-            cluster, title.removeprefix("TITLE:").strip() or cluster, body.strip(), llm.model
-        )
+        title, _, body = result.strip().partition("\n")
+        title = title.strip().strip("#* ").removeprefix("TITLE:").strip()
+        store.put_cluster_summary(job.key, title or job.key, body.strip(), llm.model)
         cluster_done += 1
     return {"modules": done, "clusters": cluster_done, "skipped": skipped, "failed": failed}
 

@@ -1,82 +1,132 @@
-# code-review-graph
+# code-reviewer-graph
 
-**Compile your repo into a self-updating knowledge graph, then review pull requests with the blast radius in view.**
+**Compile any codebase into a self-updating knowledge graph, then review pull requests with a team of local AI agents that can see the blast radius. Free, private, and live on screen.**
 
-Most AI code review tools paste a diff into a model and hope. The model never sees the callers three files away, doesn't know the module had the same bug last month, and forgets everything the moment the review ends.
+![Five local agents reviewing a diff in parallel](docs/dashboard.jpg)
 
-`code-review-graph` (`crg`) takes the other approach, inspired by Andrej Karpathy's *LLM wiki* idea: **compile knowledge once, keep it current, and query it.** It doesn't re-read raw source on every review. It builds a persistent graph of your codebase, has Claude write an interlinked wiki on top of it, and feeds each review the small subgraph a change actually touches. Reviews also write back what they learn, so review #500 knows things review #1 didn't.
+Most AI code review tools paste a diff into a model and hope. The model never sees the callers three files away, doesn't know the module broke the same way last month, and forgets everything when the review ends.
+
+`code-reviewer-graph` (`crg`) follows Andrej Karpathy's *LLM wiki* idea: **compile knowledge once, keep it current, and query it.** It builds a persistent graph of your code in any language. Agents write an interlinked wiki on top of it, and each review gets only the subgraph a change actually touches. Reviews write back what they learn, so review #500 knows things review #1 didn't.
+
+By default every agent runs **locally through Ollama**: no API key, no cost, and no code leaves your machine.
 
 ```
              ┌──────────────── exact layer (tree-sitter, no LLM) ────────────────┐
-  source ──▶ │ nodes: modules, classes, functions, methods                       │
+  source ──▶ │ nodes: modules, classes, functions, methods     300+ languages    │
              │ edges: calls · imports · contains   (+ confidence on every edge) │
              └───────────────────────────────┬───────────────────────────────────┘
                                              │ clusters (label propagation)
-             ┌───────────────────────────────▼────── meaning layer (Claude) ──────┐
-             │ module pages · cluster pages · [[backlinks]] from the graph        │
-             │ notes written back by reviews and people                           │
+             ┌───────────────────────────────▼──── meaning layer (local agents) ──┐
+             │ librarian agents write module + cluster pages, [[backlinks]]       │
+             │ from the graph, notes written back by past reviews                 │
              └───────────────────────────────┬───────────────────────────────────┘
                                              │
-  PR diff ──▶ changed nodes ──▶ reverse-reachable callers + tests ──▶ wiki pages ──▶ review
-                                                                                   │
-                                          learnings written back into the graph ◀──┘
+  PR diff ──▶ changed nodes ──▶ callers + tests in reach ──▶ wiki pages ──┐
+                                                                          ▼
+      ┌─────────────┬──────────┬──────────────┬─────────────┬─────────┐
+      │ Correctness │ Security │ Blast Radius │ Performance │  Tests  │  specialists, in parallel
+      └──────┬──────┴────┬─────┴──────┬───────┴──────┬──────┴────┬────┘
+             └───────────┴── consensus by location ──┴───────────┘
+                                      ▼
+                             Judge ──▶ final review ──▶ learnings written back to the graph
 ```
 
-## Why a graph?
+## Quickstart (free, local)
 
-Code is a graph whether you treat it as one or not. "What breaks if I change `parse_price`?" is a graph question: start at the node and walk the `calls` edges backwards. Plain text search can't answer it, and a model reading a diff can't either.
+```bash
+# 1. a local model runtime
+brew install ollama            # or see ollama.com for Linux/Windows
+OLLAMA_NUM_PARALLEL=4 ollama serve
+ollama pull qwen2.5-coder:7b   # any chat model works; bigger = better reviews
 
-| | Chat wrapper | code-review-graph |
+# 2. crg
+pip install git+https://github.com/tedevH/code-reviewer-graph
+
+# 3. in your repo
+crg index                          # parse into the graph: seconds, no LLM
+crg compile --ui                   # librarian agents write the wiki, live on screen
+crg review --diff main --ui --learn  # 5 specialists + judge review your branch
+```
+
+`--ui` opens the dashboard at `http://127.0.0.1:8765`. Every agent gets a card showing its status (queued, waiting for model, thinking, writing, done), its live token stream, tokens/sec and elapsed time. A run panel and an activity log sit beside the cards, and the final review appears when the judge finishes. The server binds to localhost only.
+
+## The agents
+
+| Agent | Looks for |
+|---|---|
+| **Correctness** | logic errors, edge cases, null/empty handling, error paths, concurrency |
+| **Security** | injection, authn/authz gaps, secrets, unsafe deserialization, path traversal, SSRF |
+| **Blast Radius** | callers the diff didn't touch that now break (signature, return value, invariant) |
+| **Performance** | algorithmic blowups, N+1 queries, blocking I/O on hot paths, unbounded memory |
+| **Tests** | changed behaviour no test reaches, tests the diff makes wrong |
+| **Judge** | checks every finding against the diff, drops speculation, merges duplicates, writes the review |
+| **Librarians** | a pool of workers that write wiki pages for modules in parallel (`compile`) |
+
+Small local models are much better at one narrow question than at "review this", so each specialist gets one job. Before the judge runs, crg groups the specialists' findings by file and line and tells the judge how many agents flagged each spot independently. That is a deterministic consensus signal that helps a small judge separate real bugs from noise.
+
+**Tested on a MacBook (M5, 24 GB) with `gemma3:4b`:** on a diff with two planted bugs, all five specialists flagged the broken `parse_price` (5/5 consensus) and three flagged the broken discount math. The full review took about 45 seconds and cost nothing. A 4B judge still lets some duplicates through. Use a 7–14B coder model, or give the judge a bigger one:
+
+```bash
+crg review --diff main --model qwen2.5-coder:7b --judge-model qwen2.5-coder:14b --ui
+```
+
+### Model providers
+
+| `--provider` | What | Notes |
 |---|---|---|
-| Context | the diff | the diff + every caller within N hops + tests that reach it |
-| Memory | none | persistent graph + wiki + notes from past reviews |
-| Cost per review | re-reads files | reads ~a few KB of compiled pages |
-| Freshness | n/a | incremental: only modules whose hash changed get re-compiled |
-| Trust | model's guess | every edge is labeled `exact`, `name` or `ambiguous` |
+| `ollama` (default) | local models via [Ollama](https://ollama.com) | Picks your first installed model if `--model` isn't given. Set `OLLAMA_NUM_PARALLEL` so agents truly run at once. |
+| `openai` | any OpenAI-compatible local server: LM Studio, llama.cpp `llama-server`, vLLM, LocalAI | `--base-url http://localhost:1234/v1` |
+| `anthropic` | Claude via the Anthropic API | Paid; `crg compile` asks before spending. Needs `ANTHROPIC_API_KEY` or `ant auth login`. |
 
-## Install
+Environment overrides: `CRG_PROVIDER`, `CRG_MODEL`, `CRG_BASE_URL`, `CRG_NUM_CTX` (Ollama context window, default 16384; Ollama silently truncates prompts beyond it), `OLLAMA_HOST`.
 
-```bash
-pip install git+https://github.com/<you>/code-review-graph
-```
+## Languages
 
-Requires Python 3.10+. LLM features use the Claude API: set `ANTHROPIC_API_KEY` or run `ant auth login`.
+Every language [tree-sitter-language-pack](https://github.com/Goldziher/tree-sitter-language-pack) can parse (300+). Grammars download on first use and are cached.
 
-## Quickstart
+| Tier | Languages | What you get |
+|---|---|---|
+| **Deep** | Python | dedicated extractor: packages, relative imports, re-exports |
+| **Tested end to end** | TypeScript, JavaScript, Go, Java, Rust, C, C++, Ruby, PHP | cross-file call resolution through each language's import system (fixture tests in `tests/fixtures/poly/`) |
+| **Tags-query** | ~70 more with a `tags.scm` (C#, Kotlin, Swift, Scala, Dart, Elixir, Lua, OCaml, Solidity, …) | precise definitions; calls via the shared walker; imports via path-suffix matching |
+| **Heuristic** | everything else (Zig, Haskell, Julia, Nim, …) | definitions and calls from node-type heuristics |
 
-```bash
-cd your-repo
-crg index                     # parse into the graph (seconds, free, no LLM)
-crg impact --diff main        # what does my branch affect?
-crg compile                   # Claude writes the wiki (asks before calling the API)
-crg review --diff main --learn  # review with graph + wiki context, save learnings
-```
+How imports become file edges:
+- **JS/TS:** relative paths, `index` files, ESM `./x.js` → `x.ts`, `@/` aliases. npm packages are skipped.
+- **Go:** module path from `go.mod`; same-package files are visible unqualified.
+- **C/C++:** `#include` resolves relative first, and a call through `util.h` links to the definition in `util.c`.
+- **Java, Kotlin, PHP, Rust, C#, Dart:** path-suffix matching that tolerates roots like `src/main/java/` or PSR-4's `App\` → `src/`.
 
-Everything lives in `.crg/`: `graph.db` (SQLite) and `wiki/` (markdown). Open `.crg/wiki/` in Obsidian to browse the graph. Add `.crg/graph.db` to `.gitignore`. Commit `.crg/wiki/` if you want the team to share the compiled knowledge.
+Every call edge is labeled with how it was resolved:
+- `exact`: through scope, imports, `self`/`this`, the enclosing class, or the same package
+- `name`: exactly one definition in the repo has that name
+- `ambiguous`: 2–3 candidates, each linked and flagged "verify"
+
+Calls into stdlib or third-party code produce no edges.
+
+Speed: [click](https://github.com/pallets/click) (Python, 91 files), [cobra](https://github.com/spf13/cobra) (Go) and [ky](https://github.com/sindresorhus/ky) (TypeScript, 98 files) each index in about 1–1.5 seconds.
 
 ## Commands
 
 | Command | What it does | LLM? |
 |---|---|---|
 | `crg index` | Parse the repo into nodes and edges, detect clusters, render wiki skeleton | no |
-| `crg impact <symbol>…` | Callers (by hop), tests that reach the symbol, affected wiki pages | no |
-| `crg impact --diff REF` | Same, starting from the functions a `git diff REF` touches | no |
-| `crg impact --diff-file -` | Same, reading a unified diff from stdin (handy in CI) | no |
-| `crg compile [--limit N]` | Write/refresh wiki pages for stale modules and clusters | yes |
+| `crg impact <symbol>…` | Callers by hop, tests that reach the symbol, affected wiki pages | no |
+| `crg impact --diff REF` | Same, starting from the functions a `git diff REF` touches (`--diff-file -` reads stdin) | no |
+| `crg compile [--workers N] [--ui]` | Librarian agents write pages for stale modules and clusters (incremental by file hash) | yes |
+| `crg review --diff REF [--ui] [--learn]` | Specialists + judge review the diff with graph and wiki context | yes |
 | `crg wiki` | Re-render the wiki from the store | no |
-| `crg review --diff REF [--learn]` | Review a diff with the impact subgraph + wiki as context | yes |
 | `crg learn <target> "<fact>"` | Attach a durable note to a module or symbol | no |
 | `crg stats` | Graph size, clusters, stale modules | no |
 
-Symbols can be given as `path::Qual.name`, `module.Qual.name`, or a bare name.
+Useful flags: `--agents security,correctness` runs a subset of specialists, `--depth N` sets caller hops, `--workers N` sets parallel agents, and `--port` / `--no-open` control the dashboard.
 
-### Example: `crg impact` on [pallets/click](https://github.com/pallets/click)
+Everything lives in `.crg/`: `graph.db` (SQLite) and `wiki/` (markdown, Obsidian-compatible). Ignore `graph.db` in git. Commit `wiki/` if you want the team to share the compiled knowledge.
+
+### Example: `crg impact` on click
 
 ```
 $ crg impact click.parser._unpack_args --depth 4
-
-## Changed
-- `src/click/parser.py:51` function `_unpack_args`
 
 ## Callers (blast radius)
 ### 1 hop
@@ -85,29 +135,10 @@ $ crg impact click.parser._unpack_args --depth 4
 - `src/click/parser.py:298` method `_OptionParser.parse_args` → calls `_OptionParser._process_args_for_args`
 ### 3 hops
 - `src/click/core.py:1396` method `Command.parse_args` → calls `_OptionParser.parse_args` _(ambiguous, verify)_
-- `src/click/core.py:2038` method `Group.parse_args` → calls `_OptionParser.parse_args` _(ambiguous, verify)_
 ...
 ## Tests that reach the change
 - `tests/test_basic.py:131` function `test_return_values` → calls `Command.make_context` _(ambiguous, verify)_
 ```
-
-Indexing all of click (91 modules, ~2,000 definitions, ~3,000 call edges) takes about one second.
-
-## How it works
-
-**Exact layer.** [tree-sitter](https://tree-sitter.github.io/) parses each file into definitions, call sites and imports. A resolver links call sites across files through local definitions, `self.`/`cls.`, `import x`, `from x import y`, relative imports and package re-exports. When static resolution fails it falls back to name matching and says so:
-
-- `exact`: resolved through scope or imports
-- `name`: exactly one definition in the repo has that name
-- `ambiguous`: 2–3 candidates (receiver type unknown), each linked and flagged
-
-Calls into the stdlib or third-party packages produce no edges.
-
-**Clusters.** Modules are grouped by label propagation over the import and call graph, with degree-normalized weights so hub modules don't swallow everything. A cluster is a set of modules that change together. It gets its own wiki page describing the invariants that span those modules.
-
-**Meaning layer.** `crg compile` sends each module's source plus its graph neighbourhood to Claude and stores the summary keyed by file hash. Unchanged files are never re-sent. The wiki pages mix LLM prose with deterministic structure: every `[[link]]` comes from the graph, not from the model.
-
-**Write-back.** `crg review --learn` asks the model for durable facts ("prices arrive as `$`-prefixed strings") and attaches them to the relevant nodes. `crg learn` lets humans do the same. Notes show up in the wiki and in every future review that touches that code.
 
 ## Using it in CI
 
@@ -123,9 +154,10 @@ jobs:
         with: { fetch-depth: 0 }
       - uses: actions/setup-python@v5
         with: { python-version: "3.12" }
-      - run: pip install git+https://github.com/<you>/code-review-graph
+      - run: pip install git+https://github.com/tedevH/code-reviewer-graph
       - run: crg index
-      - run: crg review --diff origin/${{ github.base_ref }} --effort high > review.md
+      # Local models need a GPU runner; on hosted runners use the Claude provider.
+      - run: crg review --provider anthropic --diff origin/${{ github.base_ref }} > review.md
         env: { ANTHROPIC_API_KEY: "${{ secrets.ANTHROPIC_API_KEY }}" }
       - run: gh pr comment ${{ github.event.number }} --body-file review.md
         env: { GH_TOKEN: "${{ github.token }}" }
@@ -135,28 +167,29 @@ Cache `.crg/` between runs (`actions/cache`) so `compile` only re-summarizes cha
 
 ## Limitations
 
-- **Python only** for now. The extractor interface (`code_review_graph/extract/`) is small, so adding TypeScript, Go and others is the top roadmap item.
 - Static resolution can't see dynamic dispatch, monkey-patching or callbacks passed as values. Those show up as missing or `ambiguous` edges, never as false `exact` ones.
-- Very large files (>200 KB) are skipped by `compile` rather than silently truncated.
+- Outside the tested languages, import resolution is best-effort, so expect more `name`/`ambiguous` edges.
+- Review quality tracks model size. A 4B model finds real bugs but writes a noisier final review than a 14B model or Claude.
+- Files over 1 MB are skipped by `index`, and over 200 KB by `compile`, rather than silently truncated.
 
 ## Roadmap
 
-- [ ] TypeScript/JavaScript and Go extractors
-- [ ] Git-history edges (`modified_in`, `fixed_bug`) so reviews know which code has broken before
-- [ ] Eval harness: replay historical bug-introducing PRs and measure precision/recall
-- [ ] GitHub App with inline comments
+- [ ] Git-history edges (`modified_in`, `fixed_bug`) so agents know which code has broken before
+- [ ] Eval harness: replay historical bug-introducing PRs and measure each agent's precision/recall
+- [ ] Graph view in the dashboard (the impact subgraph, lit up as agents cite it)
 - [ ] MCP server so coding agents can query the graph directly
+- [ ] GitHub App with inline comments
 
 ## Contributing
 
 ```bash
-git clone https://github.com/<you>/code-review-graph && cd code-review-graph
+git clone https://github.com/tedevH/code-reviewer-graph && cd code-reviewer-graph
 python -m venv .venv && . .venv/bin/activate
 pip install -e ".[dev]"
 pytest
 ```
 
-Tests run against a small fixture repo in `tests/fixtures/shop/` and never call the API.
+The tests never call a model: agents run against scripted fakes, including one that proves the specialists execute concurrently. Language tests download tree-sitter grammars on first run.
 
 ## License
 

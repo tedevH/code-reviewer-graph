@@ -1,0 +1,319 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>crg · agents</title>
+<style>
+:root {
+  --bg: #f6f7f9; --panel: #ffffff; --ink: #14161a; --muted: #69707d; --faint: #9aa1ad;
+  --line: #e4e7ec; --stream: #f9fafb; --chip: #eef0f4;
+  --ok: #1f9d55; --err: #d93a3f; --warn: #c27c0e; --think: #7c4dd6; --write: #2f6bff;
+  --shadow: 0 1px 2px rgba(16,24,40,.05), 0 1px 3px rgba(16,24,40,.06);
+  --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  --sans: -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", Roboto, sans-serif;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0d0f12; --panel: #15181d; --ink: #e8eaee; --muted: #9aa1ad; --faint: #6b7280;
+    --line: #262a31; --stream: #101317; --chip: #1f232a;
+    --shadow: 0 1px 2px rgba(0,0,0,.4);
+  }
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; background: var(--bg); color: var(--ink); font: 14px/1.45 var(--sans); }
+header {
+  position: sticky; top: 0; z-index: 5; background: color-mix(in srgb, var(--bg) 88%, transparent);
+  backdrop-filter: blur(8px); border-bottom: 1px solid var(--line);
+}
+.bar { display: flex; align-items: center; gap: 14px; padding: 12px 20px; flex-wrap: wrap; }
+.brand { display: flex; align-items: center; gap: 9px; font-weight: 650; letter-spacing: -.01em; }
+.brand svg { width: 22px; height: 22px; }
+.title { color: var(--muted); }
+.spacer { flex: 1; }
+.chip { background: var(--chip); border-radius: 999px; padding: 3px 10px; font-size: 12.5px; color: var(--muted); white-space: nowrap; }
+.chip b { color: var(--ink); font-weight: 600; }
+.live { display: inline-flex; align-items: center; gap: 6px; font-size: 12.5px; color: var(--muted); }
+.live i { width: 8px; height: 8px; border-radius: 50%; background: var(--faint); }
+.live.on i { background: var(--ok); box-shadow: 0 0 0 0 rgba(31,157,85,.5); animation: ping 1.6s infinite; }
+.live.done i { background: var(--ok); }
+@keyframes ping { 70% { box-shadow: 0 0 0 7px rgba(31,157,85,0); } 100% { box-shadow: 0 0 0 0 rgba(31,157,85,0); } }
+.progress { height: 3px; background: var(--line); }
+.progress > div { height: 100%; width: 0; background: var(--write); transition: width .4s ease; }
+
+main { display: grid; grid-template-columns: minmax(0, 1fr) 320px; gap: 20px; padding: 20px; max-width: 1600px; margin: 0 auto; }
+@media (max-width: 1000px) { main { grid-template-columns: 1fr; padding: 16px; } }
+.stats { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; margin-bottom: 18px; }
+@media (max-width: 640px) { .stats { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+.stat { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 12px 14px; box-shadow: var(--shadow); }
+.stat .k { color: var(--muted); font-size: 12px; }
+.stat .v { font-size: 22px; font-weight: 650; letter-spacing: -.02em; font-variant-numeric: tabular-nums; }
+
+.grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 14px; }
+.card {
+  background: var(--panel); border: 1px solid var(--line); border-radius: 14px; box-shadow: var(--shadow);
+  display: flex; flex-direction: column; overflow: hidden; position: relative; min-height: 280px;
+  transition: border-color .2s, transform .2s;
+}
+.card::before { content: ""; position: absolute; inset: 0 0 auto 0; height: 3px; background: var(--accent); opacity: .9; }
+.card.active { border-color: color-mix(in srgb, var(--accent) 45%, var(--line)); }
+.card.wide { grid-column: 1 / -1; }
+.head { display: flex; gap: 11px; align-items: center; padding: 14px 14px 8px; }
+.avatar {
+  width: 34px; height: 34px; border-radius: 10px; display: grid; place-items: center; flex: none;
+  background: color-mix(in srgb, var(--accent) 16%, transparent); color: var(--accent); font-weight: 700; font-size: 13px;
+}
+.who { min-width: 0; flex: 1; }
+.who .n { font-weight: 620; }
+.who .r { color: var(--muted); font-size: 12.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.pill { font-size: 11px; font-weight: 650; letter-spacing: .04em; text-transform: uppercase; padding: 3px 8px; border-radius: 999px; display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
+.pill i { width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+.s-queued .pill, .s-idle .pill { color: var(--faint); background: var(--chip); }
+.s-waiting .pill { color: var(--warn); background: color-mix(in srgb, var(--warn) 14%, transparent); }
+.s-waiting .pill i { animation: blink 1s infinite; }
+.s-thinking .pill { color: var(--think); background: color-mix(in srgb, var(--think) 14%, transparent); }
+.s-thinking .pill i { animation: blink .7s infinite; }
+.s-writing .pill { color: var(--write); background: color-mix(in srgb, var(--write) 14%, transparent); }
+.s-writing .pill i { animation: blink .5s infinite; }
+.s-done .pill { color: var(--ok); background: color-mix(in srgb, var(--ok) 14%, transparent); }
+.s-error .pill { color: var(--err); background: color-mix(in srgb, var(--err) 14%, transparent); }
+@keyframes blink { 50% { opacity: .25; } }
+.task { margin: 0 14px 8px; font: 12px var(--mono); color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-height: 16px; }
+.stream {
+  margin: 0 14px; flex: 1; background: var(--stream); border: 1px solid var(--line); border-radius: 10px;
+  padding: 10px 12px; font: 12.5px/1.55 var(--mono); white-space: pre-wrap; word-break: break-word;
+  overflow-y: auto; max-height: 230px; min-height: 140px; color: var(--ink);
+}
+.card.wide .stream { max-height: 340px; }
+.stream .th { color: var(--think); opacity: .75; font-style: italic; }
+.stream .ph { color: var(--faint); font-family: var(--sans); }
+.s-writing .stream::after { content: "▍"; color: var(--write); animation: blink .8s infinite; }
+.foot { display: flex; gap: 12px; padding: 10px 14px 12px; color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+.foot .err { color: var(--err); }
+
+aside { display: flex; flex-direction: column; gap: 14px; min-width: 0; }
+.panel { background: var(--panel); border: 1px solid var(--line); border-radius: 14px; box-shadow: var(--shadow); padding: 14px; }
+.panel > h3 { margin: 0 0 10px; font-size: 13px; color: var(--muted); font-weight: 600; text-transform: uppercase; letter-spacing: .05em; }
+.ctx { display: grid; gap: 6px; font-size: 13px; }
+.ctx div { display: flex; justify-content: space-between; gap: 10px; }
+.ctx span:last-child { font-weight: 600; font-variant-numeric: tabular-nums; }
+.ctx code { font: 12px var(--mono); color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.log { font-size: 12.5px; max-height: 420px; overflow-y: auto; display: flex; flex-direction: column; gap: 6px; }
+.log div { display: grid; grid-template-columns: 46px 1fr; gap: 8px; }
+.log .t { color: var(--faint); font-variant-numeric: tabular-nums; }
+.log .warn { color: var(--warn); } .log .err { color: var(--err); } .log .ok { color: var(--ok); }
+
+.result { margin-top: 18px; display: none; }
+.result.show { display: block; }
+.md { font-size: 14.5px; line-height: 1.6; }
+.md h2 { font-size: 16px; margin: 18px 0 6px; } .md h2:first-child { margin-top: 0; }
+.md h3 { font-size: 14.5px; margin: 14px 0 4px; }
+.md code { font: 12.5px var(--mono); background: var(--chip); padding: 1px 5px; border-radius: 5px; }
+.md pre { background: var(--stream); border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; overflow-x: auto; }
+.md pre code { background: none; padding: 0; }
+.md ul { padding-left: 20px; margin: 6px 0; }
+.empty { color: var(--faint); padding: 40px 0; text-align: center; grid-column: 1 / -1; }
+</style>
+</head>
+<body>
+<header>
+  <div class="bar">
+    <div class="brand">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round">
+        <circle cx="5" cy="6" r="2.2"/><circle cx="19" cy="6" r="2.2"/><circle cx="12" cy="18" r="2.2"/>
+        <path d="M7 7l3.6 9M17 7l-3.6 9M7.2 6h9.6"/>
+      </svg>
+      code-review-graph
+    </div>
+    <span class="title" id="title">Waiting for a run…</span>
+    <span class="spacer"></span>
+    <span class="chip" id="model">model —</span>
+    <span class="chip"><b id="clock">0:00</b></span>
+    <span class="live" id="live"><i></i><span id="liveText">connecting</span></span>
+  </div>
+  <div class="progress"><div id="progress"></div></div>
+</header>
+
+<main>
+  <section>
+    <div class="stats">
+      <div class="stat"><div class="k">Agents working</div><div class="v" id="sActive">0</div></div>
+      <div class="stat"><div class="k" id="sDoneLabel">Tasks done</div><div class="v" id="sDone">0</div></div>
+      <div class="stat"><div class="k">Tokens generated</div><div class="v" id="sTokens">0</div></div>
+      <div class="stat"><div class="k">Throughput</div><div class="v" id="sRate">0 <small style="font-size:12px;color:var(--muted)">tok/s</small></div></div>
+    </div>
+    <div class="grid" id="grid"><div class="empty">No agents yet. Start one with <code>crg review --ui</code> or <code>crg compile --ui</code>.</div></div>
+    <div class="panel result" id="result"><h3>Final review</h3><div class="md" id="resultBody"></div></div>
+  </section>
+  <aside>
+    <div class="panel"><h3>Run</h3><div class="ctx" id="ctx"><div><span>Status</span><span>—</span></div></div></div>
+    <div class="panel"><h3>Activity</h3><div class="log" id="log"></div></div>
+  </aside>
+</main>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const agents = new Map();      // id -> {el, status, tokens, done, started, ...}
+let run = null, startedAt = null, finished = false, totalTasks = 0, doneTasks = 0, totalTokens = 0, firstTokenAt = null;
+const LABEL = { queued: "queued", waiting: "waiting for model", thinking: "thinking", writing: "writing", done: "done", error: "error", idle: "finished" };
+
+function esc(s) { return String(s).replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c])); }
+function initials(name) { return name.split(/\s+/).map(w => w[0]).join("").slice(0, 2).toUpperCase(); }
+function fmtTime(s) { s = Math.max(0, Math.floor(s)); return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`; }
+
+function card(e) {
+  let a = agents.get(e.id);
+  if (a) return a;
+  if (agents.size === 0) $("grid").innerHTML = "";
+  const el = document.createElement("div");
+  el.className = "card s-queued";
+  el.style.setProperty("--accent", e.color || "#2f6bff");
+  if (e.id === "judge") el.classList.add("wide");
+  el.innerHTML = `
+    <div class="head">
+      <div class="avatar">${esc(initials(e.name || e.id))}</div>
+      <div class="who"><div class="n">${esc(e.name || e.id)}</div><div class="r">${esc(e.role || "")}</div></div>
+      <span class="pill"><i></i><span class="pl">queued</span></span>
+    </div>
+    <div class="task"></div>
+    <div class="stream"><span class="ph">Queued…</span></div>
+    <div class="foot"><span class="tk">0 tok</span><span class="rt"></span><span class="el"></span><span class="spacer"></span><span class="ct"></span></div>`;
+  $("grid").appendChild(el);
+  a = { el, status: "queued", tokens: 0, taskTokens: 0, tasks: 0, started: null, text: null, thinking: null };
+  agents.set(e.id, a);
+  return a;
+}
+
+function setStatus(a, status) {
+  a.status = status;
+  a.el.className = a.el.className.replace(/\bs-\w+/, "s-" + status);
+  a.el.classList.toggle("active", ["waiting", "thinking", "writing"].includes(status));
+  a.el.querySelector(".pl").textContent = LABEL[status] || status;
+}
+
+function resetStream(a, placeholder) {
+  const s = a.el.querySelector(".stream");
+  s.innerHTML = placeholder ? `<span class="ph">${esc(placeholder)}</span>` : "";
+  a.text = null; a.thinking = null; a.taskTokens = 0;
+}
+
+function append(a, kind, text) {
+  const s = a.el.querySelector(".stream");
+  const ph = s.querySelector(".ph"); if (ph) ph.remove();
+  const nearBottom = s.scrollHeight - s.scrollTop - s.clientHeight < 40;
+  if (kind === "thinking") {
+    if (!a.thinking) { a.thinking = document.createElement("span"); a.thinking.className = "th"; s.appendChild(a.thinking); }
+    a.thinking.textContent += text;
+  } else {
+    if (!a.text) { a.text = document.createElement("span"); if (a.thinking) s.appendChild(document.createTextNode("\n\n")); s.appendChild(a.text); }
+    a.text.textContent += text;
+  }
+  if (nearBottom) s.scrollTop = s.scrollHeight;
+}
+
+function log(t, message, cls = "") {
+  const row = document.createElement("div");
+  row.innerHTML = `<span class="t">${fmtTime(t)}</span><span class="${cls}">${esc(message)}</span>`;
+  $("log").prepend(row);
+}
+
+function md(src) {
+  const lines = esc(src).split("\n"); let html = "", inList = false, inCode = false;
+  const inline = s => s.replace(/`([^`]+)`/g, "<code>$1</code>").replace(/\*\*([^*]+)\*\*/g, "<b>$1</b>");
+  for (const line of lines) {
+    if (line.startsWith("```")) { html += inCode ? "</code></pre>" : "<pre><code>"; inCode = !inCode; continue; }
+    if (inCode) { html += line + "\n"; continue; }
+    const li = /^\s*[-*] (.*)/.exec(line);
+    if (li) { if (!inList) { html += "<ul>"; inList = true; } html += `<li>${inline(li[1])}</li>`; continue; }
+    if (inList) { html += "</ul>"; inList = false; }
+    const h = /^(#{1,3}) (.*)/.exec(line);
+    if (h) html += `<h${Math.max(2, h[1].length)}>${inline(h[2])}</h${Math.max(2, h[1].length)}>`;
+    else if (line.trim()) html += `<p>${inline(line)}</p>`;
+  }
+  return html + (inList ? "</ul>" : "") + (inCode ? "</code></pre>" : "");
+}
+
+function renderContext() {
+  if (!run) return;
+  const m = run.meta || {};
+  const rows = [["Mode", run.kind], ["Provider", run.provider], ["Repo", run.repo]];
+  for (const [k, v] of Object.entries(m)) rows.push([k, v]);
+  $("ctx").innerHTML = rows.map(([k, v]) => `<div><span>${esc(k)}</span>${String(v).includes("/") ? `<code>${esc(v)}</code>` : `<span>${esc(v)}</span>`}</div>`).join("");
+}
+
+function refreshStats() {
+  let active = 0;
+  for (const a of agents.values()) if (["waiting", "thinking", "writing"].includes(a.status)) active++;
+  $("sActive").textContent = active;
+  $("sDone").textContent = totalTasks ? `${doneTasks}/${totalTasks}` : doneTasks;
+  $("sTokens").textContent = totalTokens.toLocaleString();
+  const secs = firstTokenAt ? (performance.now() - firstTokenAt) / 1000 : 0;
+  $("sRate").firstChild.textContent = (secs > 1 ? Math.round(totalTokens / secs) : 0) + " ";
+  $("progress").style.width = totalTasks ? `${Math.min(100, (doneTasks / totalTasks) * 100)}%` : "0%";
+}
+
+function handle(e) {
+  switch (e.type) {
+    case "run":
+      run = e; startedAt = performance.now() - e.t * 1000; totalTasks = (e.meta && e.meta.tasks) || 0;
+      $("title").textContent = e.title; $("model").innerHTML = `<b>${esc(e.model)}</b> · ${esc(e.provider)}`;
+      $("sDoneLabel").textContent = e.kind === "review" ? "Agents finished" : "Pages written";
+      renderContext(); log(e.t, `Started: ${e.title}`);
+      break;
+    case "agent": {
+      const a = card(e);
+      if (e.name) { a.el.querySelector(".n").textContent = e.name; }
+      if (e.reset) {
+        resetStream(a, "Sending prompt to the model…");
+        a.started = performance.now();
+        a.el.querySelector(".task").textContent = e.task || "";
+      }
+      if (e.status === "idle") resetStream(a, `Finished ${a.tasks} task${a.tasks === 1 ? "" : "s"}.`);
+      if (e.status === "queued" && !e.reset) resetStream(a, "Queued…");
+      setStatus(a, e.status);
+      break;
+    }
+    case "delta": {
+      const a = agents.get(e.id); if (!a) break;
+      append(a, e.kind, e.text);
+      const n = Math.max(1, Math.round(e.text.length / 4));
+      a.tokens += n; a.taskTokens += n; totalTokens += n;
+      if (!firstTokenAt) firstTokenAt = performance.now();
+      a.el.querySelector(".tk").textContent = `${a.taskTokens.toLocaleString()} tok`;
+      break;
+    }
+    case "agent_done": {
+      const a = agents.get(e.id); if (!a) break;
+      a.tasks++; doneTasks++;
+      setStatus(a, e.status);
+      const rate = e.seconds > 0 ? Math.round(e.tokens / e.seconds) : 0;
+      a.el.querySelector(".tk").textContent = `${e.tokens.toLocaleString()} tok`;
+      a.el.querySelector(".rt").textContent = `${rate} tok/s`;
+      a.el.querySelector(".el").textContent = `${e.seconds.toFixed(1)}s`;
+      a.el.querySelector(".ct").textContent = a.tasks > 1 || e.task ? `${a.tasks} done` : "";
+      if (e.status === "error") { append(a, "text", `\n\n⚠ ${e.error}`); log(e.t, `${a.el.querySelector(".n").textContent} failed: ${e.error}`, "err"); }
+      else log(e.t, `${a.el.querySelector(".n").textContent} finished${e.task ? " " + e.task : ""} (${e.tokens} tok, ${e.seconds.toFixed(1)}s)`, "ok");
+      break;
+    }
+    case "log": log(e.t, e.message, e.level === "warn" ? "warn" : e.level === "error" ? "err" : ""); break;
+    case "result":
+      $("result").classList.add("show"); $("resultBody").innerHTML = md(e.markdown);
+      $("result").scrollIntoView({ behavior: "smooth", block: "start" });
+      break;
+    case "run_done":
+      finished = true; $("live").className = "live done"; $("liveText").textContent = "complete";
+      $("clock").textContent = fmtTime(e.seconds); log(e.t, `Run complete in ${fmtTime(e.seconds)}`, "ok");
+      $("progress").style.width = "100%";
+      break;
+  }
+  refreshStats();
+}
+
+const source = new EventSource("/events");
+source.onopen = () => { if (!finished) { $("live").className = "live on"; $("liveText").textContent = "live"; } };
+source.onerror = () => { if (!finished) { $("live").className = "live"; $("liveText").textContent = "reconnecting"; } };
+source.onmessage = (m) => handle(JSON.parse(m.data));
+setInterval(() => { if (startedAt && !finished) $("clock").textContent = fmtTime((performance.now() - startedAt) / 1000); refreshStats(); }, 500);
+</script>
+</body>
+</html>

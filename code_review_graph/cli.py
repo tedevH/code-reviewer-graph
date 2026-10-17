@@ -7,26 +7,27 @@ import sys
 from pathlib import Path
 
 from code_review_graph import context as ctx_mod
+from code_review_graph.agents import SPECIALISTS, multi_agent_review
 from code_review_graph.diff import changed_nodes, git_diff
+from code_review_graph.events import EventBus, TerminalReporter
 from code_review_graph.indexer import index_repo
-from code_review_graph.llm import DEFAULT_MODEL, LLM
+from code_review_graph.llm import DEFAULT_PROVIDER, LLMError, make_llm
 from code_review_graph.store import GraphStore
 from code_review_graph.wiki import compile_wiki, render_wiki
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(prog="crg", description="Code review graph: a compiled, "
+    parser = argparse.ArgumentParser(prog="crg", description="code-reviewer-graph: a compiled, "
                                      "self-updating knowledge graph of your repo for code review.")
     parser.add_argument("--repo", type=Path, default=Path("."), help="repository root (default: .)")
     sub = parser.add_subparsers(dest="command", required=True)
 
     sub.add_parser("index", help="parse the repo into the exact graph (no LLM)")
 
-    p = sub.add_parser("compile", help="LLM-compile stale modules and clusters into the wiki")
+    p = sub.add_parser("compile", help="have agents write wiki pages for stale modules and clusters")
     p.add_argument("--limit", type=int, help="compile at most N modules this run")
-    p.add_argument("--model", default=DEFAULT_MODEL)
-    p.add_argument("--effort", default="low", choices=["low", "medium", "high", "xhigh", "max"])
-    p.add_argument("-y", "--yes", action="store_true", help="don't ask before calling the API")
+    _add_model_args(p, effort="low", workers=3)
+    p.add_argument("-y", "--yes", action="store_true", help="don't ask before calling a paid API")
 
     sub.add_parser("wiki", help="re-render wiki pages from the graph (no LLM)")
 
@@ -34,10 +35,12 @@ def main(argv: list[str] | None = None) -> int:
     _add_target_args(p)
     p.add_argument("--format", choices=["markdown", "json"], default="markdown")
 
-    p = sub.add_parser("review", help="review a diff with graph + wiki context")
+    p = sub.add_parser("review", help="multi-agent review of a diff with graph + wiki context")
     _add_target_args(p, symbols=False)
-    p.add_argument("--model", default=DEFAULT_MODEL)
-    p.add_argument("--effort", default="high", choices=["low", "medium", "high", "xhigh", "max"])
+    _add_model_args(p, effort="high", workers=len(SPECIALISTS))
+    p.add_argument("--agents", help="comma-separated specialists to run (default: all): "
+                   + ",".join(s.id for s in SPECIALISTS))
+    p.add_argument("--judge-model", help="a different (usually larger) model for the judge, same provider")
     p.add_argument("--learn", action="store_true", help="write the review's learnings back into the graph")
 
     p = sub.add_parser("learn", help="attach a durable note to a module or symbol")
@@ -63,6 +66,52 @@ def _add_target_args(p: argparse.ArgumentParser, symbols: bool = True) -> None:
     p.add_argument("--depth", type=int, default=3, help="caller hops to follow (default: 3)")
 
 
+def _add_model_args(p: argparse.ArgumentParser, effort: str, workers: int) -> None:
+    p.add_argument("--provider", default=DEFAULT_PROVIDER, choices=["ollama", "openai", "anthropic"],
+                   help="ollama (local, default), openai (any OpenAI-compatible local server), anthropic")
+    p.add_argument("--model", help="model name (default: first installed local model, or Claude Opus)")
+    p.add_argument("--base-url", help="server URL for ollama/openai providers")
+    p.add_argument("--effort", default=effort, choices=["low", "medium", "high", "xhigh", "max"],
+                   help="Claude only")
+    p.add_argument("--workers", type=int, default=workers, help=f"agents running in parallel (default: {workers})")
+    p.add_argument("--ui", action="store_true", help="open the live agent dashboard")
+    p.add_argument("--port", type=int, default=8765, help="dashboard port (default: 8765)")
+    p.add_argument("--no-open", action="store_true", help="don't open a browser tab for the dashboard")
+
+
+class _Run:
+    """Event bus + terminal reporter + optional dashboard for one agent run."""
+
+    def __init__(self, args, kind: str, title: str, llm, repo: Path, meta: dict):
+        self.bus = EventBus()
+        self.dashboard = None
+        if args.ui:
+            from code_review_graph.ui import Dashboard
+
+            self.dashboard = Dashboard(self.bus, port=args.port, open_browser=not args.no_open).start()
+            print(f"Dashboard: {self.dashboard.url}", file=sys.stderr)
+        self.reporter = TerminalReporter(self.bus).start()
+        self.bus.emit("run", title=title, kind=kind, provider=llm.provider, model=llm.model,
+                      repo=repo.name, meta=meta)
+
+    def finish(self) -> None:
+        import time
+
+        self.bus.emit("run_done", seconds=round(time.time() - self.bus.started, 1))
+        self.reporter.stop()
+        if self.dashboard:
+            print(f"Done. Dashboard still open at {self.dashboard.url} (Ctrl+C to exit)", file=sys.stderr)
+            self.dashboard.hold()
+
+
+def _llm(args):
+    try:
+        return make_llm(args.provider, args.model, args.effort, args.base_url)
+    except LLMError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return None
+
+
 def _wiki_dir(repo: Path) -> Path:
     return repo / ".crg" / "wiki"
 
@@ -83,12 +132,23 @@ def cmd_compile(args, repo: Path, store: GraphStore) -> int:
     if not todo and not store.stale_clusters():
         print("Wiki is up to date.")
         return 0
-    if todo and not args.yes:
-        answer = input(f"Compile {len(todo)} module(s) with {args.model}? This calls the Claude API. [y/N] ")
+    llm = _llm(args)
+    if llm is None:
+        return 2
+    if todo and llm.provider == "anthropic" and not args.yes:
+        answer = input(f"Compile {len(todo)} module(s) with {llm.model}? This calls the paid Claude API. [y/N] ")
         if answer.strip().lower() not in ("y", "yes"):
             return 1
-    result = compile_wiki(repo, store, LLM(args.model, args.effort), limit=args.limit)
-    pages = render_wiki(store, _wiki_dir(repo))
+    run = _Run(args, "compile", f"Compiling wiki for {repo.name}", llm, repo,
+               {"modules to write": len(todo), "agents": args.workers, "tasks": len(todo)})
+    try:
+        result = compile_wiki(repo, store, llm, limit=args.limit, bus=run.bus, workers=args.workers,
+                              progress=run.bus.log)
+        pages = render_wiki(store, _wiki_dir(repo))
+        run.bus.log(f"Compiled {result['modules']} module(s), {result['clusters']} cluster(s); "
+                    f"{result['skipped']} skipped, {result['failed']} failed. Wrote {pages} pages.")
+    finally:
+        run.finish()
     print(f"Compiled {result['modules']} module(s), {result['clusters']} cluster(s); "
           f"{result['skipped']} skipped, {result['failed']} failed. Wrote {pages} pages to .crg/wiki/")
     return 0
@@ -136,17 +196,49 @@ def cmd_review(args, repo: Path, store: GraphStore) -> int:
     if not diff_text.strip():
         print("The diff is empty.", file=sys.stderr)
         return 2
+    only = [a.strip() for a in args.agents.split(",")] if args.agents else None
+    unknown = set(only or []) - {s.id for s in SPECIALISTS}
+    if unknown:
+        print(f"Unknown agents: {', '.join(sorted(unknown))}", file=sys.stderr)
+        return 2
+    llm = _llm(args)
+    if llm is None:
+        return 2
+    judge_llm = None
+    if args.judge_model:
+        try:
+            judge_llm = make_llm(args.provider, args.judge_model, args.effort, args.base_url)
+        except LLMError as e:
+            print(f"error: {e}", file=sys.stderr)
+            return 2
     ctx = ctx_mod.build_context(store, seeds, max_depth=args.depth)
-    result = ctx_mod.review(LLM(args.model, args.effort), diff_text, ctx_mod.render_markdown(store, ctx))
-    print(result)
-    if args.learn:
-        saved = 0
-        for target, fact in ctx_mod.parse_learnings(result):
-            if store.node(target):
-                store.add_note(target, fact, source="review")
-                saved += 1
-        render_wiki(store, _wiki_dir(repo))
-        print(f"\nSaved {saved} learning(s) to the graph.", file=sys.stderr)
+    callers = sum(1 for h in ctx["hits"] if h.depth > 0)
+    title = f"Reviewing {f'diff vs {args.diff}' if args.diff else 'diff'} in {repo.name}"
+    run = _Run(args, "review", title, llm, repo, {
+        "changed symbols": len(seeds), "callers in reach": callers, "tests in reach": len(ctx["tests"]),
+        "diff lines": diff_text.count("\n"), "tasks": len(only or SPECIALISTS) + 1,
+    })
+    try:
+        result = multi_agent_review(llm, run.bus, diff_text, ctx_mod.render_markdown(store, ctx),
+                                    workers=args.workers, only=only, judge_llm=judge_llm)
+        run.bus.emit("result", markdown=result)
+        print(result, flush=True)
+        if args.learn:
+            saved = 0
+            for target, fact in ctx_mod.parse_learnings(result):
+                if not store.node(target):
+                    target = target.partition("::")[0]   # unknown symbol: attach to its module
+                if store.node(target):
+                    store.add_note(target, fact, source="review")
+                    saved += 1
+            render_wiki(store, _wiki_dir(repo))
+            run.bus.log(f"Saved {saved} learning(s) to the graph.")
+    except Exception as e:
+        run.bus.log(f"Review failed: {e}", "error")
+        print(f"error: {e}", file=sys.stderr)
+        run.finish()
+        return 1
+    run.finish()
     return 0
 
 
