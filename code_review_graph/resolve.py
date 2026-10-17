@@ -169,6 +169,8 @@ class Resolver:
             # Imports from outside the repo resolve to nothing, and we don't name-guess them.
             return self._follow_python_import(binding, rest)
 
+        if len(parts) >= 2 and self._external_type(f, parts[0]):
+            return []
         if len(parts) >= 2 or not hasattr(builtins, parts[0]):
             return self._by_unique_name(parts[-1], f)
         return []
@@ -245,7 +247,14 @@ class Resolver:
         hits = self._find([f.path, *self._visible_files(f)], ".".join(parts))
         if hits:
             return self._graded(hits, "exact")
+        if self._external_type(f, parts[0]):
+            return []
         return self._by_unique_name(parts[-1], f)
+
+    def _external_type(self, f: FileFacts, head: str) -> bool:
+        """`Object.create`, `JSON.parse`, `String.format`: a capitalized receiver that no
+        file in the repo defines is a stdlib/third-party type, so don't name-guess."""
+        return head[:1].isupper() and not self.by_name.get((family(f.language), head))
 
     def _owner_class(self, owner: str) -> str | None:
         if self.kind.get(owner) == "method":

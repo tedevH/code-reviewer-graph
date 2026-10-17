@@ -93,3 +93,19 @@ def test_php(index):
     e = index("php")
     assert calls(e, "src/Order.php::Order.total", "src/Util.php::Util.fmt") == "exact"
     assert calls(e, "src/Order.php::Order.total", "src/Order.php::Order.sum") == "exact"
+
+
+def test_builtin_receivers_are_not_name_matched(tmp_path):
+    repo = tmp_path / "r"
+    (repo / "src").mkdir(parents=True)
+    (repo / "src" / "a.ts").write_text(
+        "export class Ky {\n  static create() { return new Ky(); }\n}\n"
+        "export const clone = () => Object.create(null);\n"
+        "export const make = () => Ky.create();\n"
+    )
+    store = GraphStore.for_repo(repo)
+    index_repo(repo, store)
+    rows = {(r["src"], r["dst"]) for r in store.conn.execute("SELECT src, dst FROM edges WHERE kind='calls'")}
+    store.close()
+    assert ("src/a.ts::make", "src/a.ts::Ky.create") in rows
+    assert not any(src == "src/a.ts::clone" for src, _ in rows)
