@@ -9,7 +9,10 @@ from dataclasses import dataclass
 
 from code_review_graph.store import GraphStore, Node
 
-TEST_PATH = re.compile(r"(^|/)(tests?/|test_[^/]*\.py$|[^/]*_test\.py$|conftest\.py$)")
+TEST_PATH = re.compile(
+    r"(^|/)((tests?|__tests__|spec|specs|test-\w+|\w+-tests?)/|test_[^/]*$|[^/]*_test\.\w+$|"
+    r"[^/]*\.(test|spec)\.\w+$|[^/]*Tests?\.(java|kt|cs|scala|swift)$|conftest\.py$)"
+)
 
 
 TESTS_CLUSTER = "tests"

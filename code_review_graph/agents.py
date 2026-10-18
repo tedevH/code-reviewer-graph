@@ -116,7 +116,16 @@ or "No issues found." if none survive.
 
 ## Learnings
 <0-3 durable facts about this codebase worth remembering for future reviews, each as
-`- <file path or path::qualname>: <fact>`>"""
+`- <file path or path::qualname>: <fact>`>
+
+## Outdated notes
+<ids of notes from earlier reviews shown in the context (like n12) that this change \
+makes false, or "none">
+
+Track records, when given, say how often each specialist's past findings in this \
+repository were acted on; trust specialists with a strong record more. Team history, \
+when given, shows findings this team acted on and ones it ignored: prefer the kind \
+it acts on."""
 
 
 class _Streamer:
@@ -172,9 +181,16 @@ def run_agent(llm: LLM, bus: EventBus, spec: AgentSpec, system: str, prompt: str
     return text
 
 
+@dataclass
+class ReviewResult:
+    markdown: str
+    specialist_findings: dict[str, str]   # specialist name -> its Findings section
+
+
 def multi_agent_review(llm: LLM, bus: EventBus, diff_text: str, context_md: str,
                        workers: int = 5, only: list[str] | None = None,
-                       judge_llm: LLM | None = None) -> str:
+                       judge_llm: LLM | None = None, records: dict | None = None,
+                       history: tuple[list[str], list[str]] | None = None) -> ReviewResult:
     specialists = [s for s in SPECIALISTS if not only or s.id in only]
     for s in [*specialists, JUDGE]:
         bus.emit("agent", id=s.id, name=s.name, role=s.role, color=s.color, status="queued")
@@ -199,14 +215,26 @@ def multi_agent_review(llm: LLM, bus: EventBus, diff_text: str, context_md: str,
     for spot in agreed:
         if len(spot["agents"]) > 1:
             bus.log(f"Consensus: {spot['file']}:{spot['line']} flagged by {len(spot['agents'])} agents")
+    records = records or {}
     table = "\n".join(
         f"- {s['file']}:{s['line']} flagged by {len(s['agents'])} of {len(findings)} "
         f"({', '.join(s['agents'])}); severities: {', '.join(s['severities'])}"
         for s in agreed
     ) or "- no findings reported"
-    judge_prompt = (f"{prompt}\n\n{reports}\n\n# Agreement between specialists\n\n{table}\n\n"
+    extra = ""
+    if records:
+        extra += "\n\n# Specialist track records in this repository\n\n" + "\n".join(
+            f"- {name}: {records[name].describe()}" for name in findings if name in records)
+    if history and (history[0] or history[1]):
+        acted, ignored = history
+        extra += ("\n\n# Team history\n\nFindings this team acted on:\n"
+                  + ("\n".join(f"- {t}" for t in acted) or "- none yet")
+                  + "\n\nFindings this team ignored or rejected:\n"
+                  + ("\n".join(f"- {t}" for t in ignored) or "- none yet"))
+    judge_prompt = (f"{prompt}\n\n{reports}\n\n# Agreement between specialists\n\n{table}{extra}\n\n"
                     "# Your task\n\nWrite the final review now, in exactly the format from your instructions.")
-    return run_agent(judge_llm or llm, bus, JUDGE, JUDGE_SYSTEM, judge_prompt, max_tokens=6000)
+    final = run_agent(judge_llm or llm, bus, JUDGE, JUDGE_SYSTEM, judge_prompt, max_tokens=6000)
+    return ReviewResult(final, findings)
 
 
 _SEVERITY = re.compile(r"\b(high|medium|low)\b", re.IGNORECASE)
@@ -219,7 +247,7 @@ def findings_section(text: str) -> str:
     return (tail if found else text).strip()
 
 
-def _findings(text: str) -> list[tuple[str, int, str]]:
+def parse_specialist_findings(text: str) -> list[tuple[str, int, str]]:
     """(file, line, severity) per `###` finding header. Models format these loosely:
     `### high: a.py:3 x`, `### <high>: a.py:3`, `### : a.py:3 **High**: x`."""
     out = []
@@ -239,7 +267,7 @@ def consensus(findings: dict[str, str], window: int = 2) -> list[dict]:
     of which problems several agents found independently. Most-agreed first."""
     spots: list[dict] = []
     for agent, text in findings.items():
-        for file, line, sev in _findings(text):
+        for file, line, sev in parse_specialist_findings(text):
             spot = next((s for s in spots if s["file"] == file and abs(s["line"] - line) <= window), None)
             if spot is None:
                 spot = {"file": file, "line": line, "agents": [], "severities": []}

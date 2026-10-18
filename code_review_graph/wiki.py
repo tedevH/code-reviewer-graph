@@ -158,13 +158,14 @@ def render_wiki(store: GraphStore, out_dir: Path) -> int:
             if paths:
                 lines += [f"## {title}", ""]
                 lines += [f"- [[{page_name(store, p)}]]" for p in sorted(paths)] + [""]
-        notes = store.notes_for_file(path)
+        notes = store.notes_for_file(path, statuses=("verified", "pending"))
         if notes:
             lines += ["## Notes", ""]
             for n in notes:
                 where = n["target"].partition("::")[2]
                 where = f" `{where}`" if where else ""
-                lines.append(f"- {n['created_at'][:10]} ({n['source']}){where}: {n['text']}")
+                unverified = " _(unverified)_" if n["status"] == "pending" else ""
+                lines.append(f"- {n['created_at'][:10]} ({n['source']}){where}: {n['text']}{unverified}")
             lines.append("")
         (out_dir / f"{name}.md").write_text("\n".join(lines))
         written += 1

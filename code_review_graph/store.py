@@ -53,15 +53,55 @@ CREATE TABLE IF NOT EXISTS cluster_summaries (
     model      TEXT NOT NULL,
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
--- Learnings written back by reviews or people. Never rebuilt, only appended.
+-- Learnings written back by reviews or people. Never rebuilt; their status changes.
 CREATE TABLE IF NOT EXISTS notes (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
     target     TEXT NOT NULL,      -- node id (module path or path::qualname)
     text       TEXT NOT NULL,
     source     TEXT NOT NULL,      -- "human" | "review"
-    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    status     TEXT NOT NULL DEFAULT 'verified',  -- pending | verified | expired
+    review_id  INTEGER,            -- review that wrote it (source = "review")
+    snapshot   TEXT,               -- target's source when written, to detect drift
+    reason     TEXT                -- why it was verified or expired
+);
+-- Outcome memory: every review, every finding, and what happened to it.
+CREATE TABLE IF NOT EXISTS reviews (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+    head        TEXT,              -- HEAD commit when reviewed
+    base        TEXT,              -- the --diff ref
+    model       TEXT,
+    judge_model TEXT
+);
+CREATE TABLE IF NOT EXISTS findings (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    review_id  INTEGER NOT NULL,
+    file       TEXT,
+    line       INTEGER,
+    severity   TEXT,
+    title      TEXT,
+    body       TEXT,
+    agents     TEXT,               -- comma-separated specialists that raised it
+    snapshot   TEXT,               -- flagged lines at review time
+    status     TEXT NOT NULL DEFAULT 'open',  -- open | acted | ignored | good | bad
+    decided_by TEXT,               -- auto | human
+    decided_at TEXT,
+    note       TEXT
+);
+-- Every specialist finding, so each agent gets its own track record.
+CREATE TABLE IF NOT EXISTS agent_findings (
+    review_id  INTEGER NOT NULL,
+    agent      TEXT NOT NULL,
+    file       TEXT,
+    line       INTEGER,
+    severity   TEXT,
+    finding_id INTEGER             -- the final finding it became, if it survived
 );
 """
+
+NOTE_COLUMNS = {"status": "TEXT NOT NULL DEFAULT 'verified'", "review_id": "INTEGER",
+                "snapshot": "TEXT", "reason": "TEXT"}
 
 
 @dataclass(frozen=True)
@@ -92,6 +132,12 @@ class GraphStore:
         self.conn = sqlite3.connect(path)
         self.conn.row_factory = sqlite3.Row
         self.conn.executescript(SCHEMA)
+        # Databases from before notes had a lifecycle: add the columns in place.
+        have = {r["name"] for r in self.conn.execute("PRAGMA table_info(notes)")}
+        with self.conn:
+            for col, decl in NOTE_COLUMNS.items():
+                if col not in have:
+                    self.conn.execute(f"ALTER TABLE notes ADD COLUMN {col} {decl}")
 
     @classmethod
     def for_repo(cls, repo: Path) -> "GraphStore":
@@ -242,14 +288,33 @@ class GraphStore:
 
     # --- notes (write-back memory) -------------------------------------------
 
-    def add_note(self, target: str, text: str, source: str = "human") -> None:
+    def add_note(self, target: str, text: str, source: str = "human", status: str = "verified",
+                 review_id: int | None = None, snapshot: str | None = None) -> int:
         with self.conn:
-            self.conn.execute(
-                "INSERT INTO notes (target, text, source) VALUES (?, ?, ?)", (target, text, source)
+            cur = self.conn.execute(
+                "INSERT INTO notes (target, text, source, status, review_id, snapshot) VALUES (?, ?, ?, ?, ?, ?)",
+                (target, text, source, status, review_id, snapshot),
             )
+        return cur.lastrowid
 
-    def notes_for_file(self, path: str) -> list[sqlite3.Row]:
+    def notes_for_file(self, path: str, statuses: tuple[str, ...] = ("verified",)) -> list[sqlite3.Row]:
+        marks = ",".join("?" * len(statuses))
         return self.conn.execute(
-            "SELECT * FROM notes WHERE target = ? OR target LIKE ? ORDER BY id",
-            (path, f"{path}::%"),
+            f"SELECT * FROM notes WHERE (target = ? OR target LIKE ?) AND status IN ({marks}) ORDER BY id",
+            (path, f"{path}::%", *statuses),
         ).fetchall()
+
+    def set_note_status(self, note_id: int, status: str, reason: str) -> None:
+        with self.conn:
+            self.conn.execute("UPDATE notes SET status = ?, reason = ? WHERE id = ?", (status, reason, note_id))
+
+    def node_source(self, repo: Path, node_id: str) -> str | None:
+        """Current source text of a node, or None if it no longer exists."""
+        node = self.node(node_id)
+        if node is None:
+            return None
+        try:
+            lines = (repo / node.path).read_text(errors="replace").splitlines()
+        except OSError:
+            return None
+        return "\n".join(lines[node.start_line - 1: node.end_line])

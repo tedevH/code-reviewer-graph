@@ -69,8 +69,8 @@ def render_markdown(store: GraphStore, ctx: dict, max_items: int | None = None) 
         out += [store.summary(path) or "_not compiled_", ""]
         notes = store.notes_for_file(path)
         if notes:
-            out += ["Notes from earlier reviews:"]
-            out += [f"- {n['text']}" for n in notes] + [""]
+            out += ["Notes from earlier reviews (verified):"]
+            out += [f"- [n{n['id']}] {n['text']}" for n in notes] + [""]
 
     seen_clusters = []
     for path in ctx["modules"]:

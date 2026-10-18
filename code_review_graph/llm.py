@@ -168,6 +168,13 @@ class OllamaLLM:
                          "completed": 0, "total": 0})
         self.pull(on_progress)
 
+    def unload(self) -> None:
+        """Free this model's memory now (e.g. before loading a larger grader)."""
+        try:
+            httpx.post(f"{self.host}/api/generate", json={"model": self.model, "keep_alive": 0}, timeout=30)
+        except httpx.HTTPError:
+            pass
+
     # --- generation ----------------------------------------------------------
 
     def complete(self, system: str, prompt: str, max_tokens: int = 16000,

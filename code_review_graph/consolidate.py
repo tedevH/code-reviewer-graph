@@ -46,7 +46,7 @@ class Finding:
         return "\n".join(lines)
 
 
-def _parse(section: str) -> tuple[str, list[Finding]]:
+def parse_findings(section: str) -> tuple[str, list[Finding]]:
     preamble, findings, current = [], [], None
     for line in section.splitlines():
         if line.lstrip().startswith("###"):
@@ -85,7 +85,7 @@ def consolidate(review_md: str, diff_text: str, hits: list[Hit], repo: Path) -> 
     if not found:
         return review_md, {}
     section, rest_marker, rest = tail.partition("\n## ")
-    preamble, findings = _parse(section)
+    preamble, findings = parse_findings(section)
 
     changed = changed_lines(diff_text)
     by_id = {h.node.id: h for h in hits}

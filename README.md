@@ -147,14 +147,16 @@ Speed: [click](https://github.com/pallets/click) (Python, 91 files), [cobra](htt
 | `crg impact <symbol>…` | Callers by hop, tests that reach the symbol, affected wiki pages | no |
 | `crg impact --diff REF` | Same, starting from the functions a `git diff REF` touches (`--diff-file -` reads stdin) | no |
 | `crg compile [--workers N] [--ui]` | Librarian agents write pages for stale modules and clusters (incremental by file hash) | yes |
-| `crg review --diff REF [--ui] [--learn]` | Specialists + judge review the diff with graph and wiki context | yes |
+| `crg review --diff REF [--ui] [--learn]` | Re-index, then specialists + judge review the diff with graph and wiki context; findings get ids (`f12`) | yes |
+| `crg feedback [f12 good\|bad] [--note ...]` | List findings and their outcomes, or mark one right or wrong | no |
+| `crg eval [--cases N] [--models a,b] [--save]` | Replay this repo's bug-fix commits to measure recall and precision, and pick the best model | yes |
 | `crg wiki` | Re-render the wiki from the store | no |
 | `crg learn <target> "<fact>"` | Attach a durable note to a module or symbol | no |
-| `crg stats` | Graph size, clusters, stale modules | no |
+| `crg stats` | Graph size, specialist track records, learnings | no |
 
 Useful flags: `--agents security,correctness` runs a subset of specialists, `--depth N` sets caller hops, `--workers N` sets parallel agents, and `--port` / `--no-open` control the dashboard.
 
-Everything lives in `.crg/`: `graph.db` (SQLite) and `wiki/` (markdown, Obsidian-compatible). Ignore `graph.db` in git. Commit `wiki/` if you want the team to share the compiled knowledge.
+Everything lives in `.crg/`: `graph.db` (SQLite: graph, reviews, outcomes, learnings), `wiki/` (markdown, Obsidian-compatible), `config.json` (defaults from `crg eval --save`) and `eval/` (eval results). Ignore `graph.db` in git. Commit `wiki/` if you want the team to share the compiled knowledge.
 
 ### Example: `crg impact` on click
 
@@ -172,6 +174,35 @@ $ crg impact click.parser._unpack_args --depth 4
 ## Tests that reach the change
 - `tests/test_basic.py:131` function `test_return_values` → calls `Command.make_context` _(ambiguous, verify)_
 ```
+
+## How it improves over time
+
+crg remembers every review and checks later what happened to each finding:
+
+| Outcome | How crg knows |
+|---|---|
+| **acted** | the flagged code changed (a snapshot of the flagged lines is gone) |
+| **ignored** | the file was committed with the flagged code untouched, or a week passed |
+| **good** / **bad** | you said so: `crg feedback f12 good`, or `crg feedback f12 bad --note "we validate upstream"` |
+
+Those outcomes feed back into the next review:
+
+- **Track records.** Each specialist's share of acted-on findings is shown to the judge, which trusts strong specialists more. A specialist whose findings keep getting ignored (under 20% after 5 decided findings) is skipped, which also saves time. `--agents` brings it back.
+- **Team history.** The judge sees recent findings your team acted on and ones it ignored, with your `--note`s, so it reports the kind of thing you care about.
+- **Verified learnings only.** `--learn` saves the judge's learnings as *pending*. They reach future reviews only after a finding from that review is acted on or marked good. They expire when the code they describe is rewritten (under 50% similar), when their review's findings are all rejected, after 14 days unconfirmed, or when a later judge lists them as outdated.
+- **Measured, not assumed.** `crg eval` mines recent bug-fix commits (`fix`, `bug`, `regression` in the message; small, source-only), checks out the buggy parent in a temporary worktree, and reviews the change that *introduces* the bug. A bug counts as caught when a finding lands on a line the real fix touched. `--models a,b` compares local models on the same cases; `--save` writes the winner and the specialists that earned their keep to `.crg/config.json`, which `review` then uses by default.
+
+Landing on the right lines is easy when the whole diff is the bug, so a **grader** model that knows the real fix (which the reviewers never see) decides whether each finding names the actual bug: same bug, related but vague, or different. A small model grades itself unreliably, so use a larger one: `--grader-model qwen2.5-coder:14b`. crg unloads the review model before grading, so both fit on a 24 GB laptop.
+
+**Measured on [ky](https://github.com/sindresorhus/ky)'s 5 most recent small bug fixes:** `qwen2.5-coder:7b` reviewers with a `qwen2.5-coder:14b` grader named **5 of 5 real bugs**, and **6 of 7 findings** described the actual bug. One example is the fix for "retry abort propagation", where the reviewer explained the cause as the abort controller being garbage-collected after `Request.clone()`, matching the fix's own comment. A review took about 55 s per case and grading 10–25 s. Caveat: each case's diff consists only of the bug, so this is easier than finding a bug inside a large mixed PR.
+
+```bash
+crg eval --cases 10 --models qwen2.5-coder:7b,qwen2.5-coder:14b --grader-model qwen2.5-coder:14b --save
+crg stats       # track records, outcomes, learnings
+crg feedback    # findings and what happened to them
+```
+
+`crg review` also re-indexes first (about a second), so the graph always matches the code being reviewed.
 
 ## Using it in CI
 
@@ -208,7 +239,6 @@ Cache `.crg/` and `~/.ollama/models` between runs (`actions/cache`), so `compile
 ## Roadmap
 
 - [ ] Git-history edges (`modified_in`, `fixed_bug`) so agents know which code has broken before
-- [ ] Eval harness: replay historical bug-introducing PRs and measure each agent's precision/recall
 - [ ] Graph view in the dashboard (the impact subgraph, lit up as agents cite it)
 - [ ] MCP server so coding agents can query the graph directly
 - [ ] GitHub App with inline comments

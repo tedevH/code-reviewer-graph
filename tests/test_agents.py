@@ -36,7 +36,7 @@ class ScriptedLLM:
 
 def test_specialists_run_in_parallel_then_judge():
     bus, llm = EventBus(), ScriptedLLM()
-    result = multi_agent_review(llm, bus, "diff", "context", workers=len(SPECIALISTS))
+    result = multi_agent_review(llm, bus, "diff", "context", workers=len(SPECIALISTS)).markdown
     assert "No issues found." in result
     assert llm.max_active == len(SPECIALISTS)
     events = bus.since(0, timeout=0)
